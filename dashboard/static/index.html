@@ -100,6 +100,43 @@ const SCENARIOS = ["A", "B", "C"];
 const latencyHistory = { A: [], B: [], C: [] };
 const prevCounts = {};
 const MAX_POINTS = 30;
+const labelEpochs = [];   // wall-clock ms per chart label, parallel to chart.data.labels
+let burstEvents = [];     // epoch-seconds of recent bursts, from the server
+
+// Draws a dashed vertical marker at the point on the x-axis nearest each
+// recent burst trigger, so a live audience can see "here's where the burst
+// hit" directly on the latency line instead of having to remember the click.
+const burstAnnotationPlugin = {
+  id: 'burstAnnotation',
+  afterDraw(chart) {
+    const { ctx, chartArea, scales } = chart;
+    if (!chartArea) return;
+    burstEvents.forEach(epochSec => {
+      const epochMs = epochSec * 1000;
+      let closestIdx = -1, closestDiff = Infinity;
+      labelEpochs.forEach((e, i) => {
+        const diff = Math.abs(e - epochMs);
+        if (diff < closestDiff) { closestDiff = diff; closestIdx = i; }
+      });
+      if (closestIdx === -1 || closestDiff > 4000) return;
+      const x = scales.x.getPixelForValue(closestIdx);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,95,2,0.65)';
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, chartArea.top);
+      ctx.lineTo(x, chartArea.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,95,2,0.85)';
+      ctx.font = '10px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('burst', x, chartArea.top - 4);
+      ctx.restore();
+    });
+  }
+};
 
 const ctx = document.getElementById('latencyChart').getContext('2d');
 const chart = new Chart(ctx, {
@@ -116,6 +153,7 @@ const chart = new Chart(ctx, {
       borderWidth: 2,
     })),
   },
+  plugins: [burstAnnotationPlugin],
   options: {
     responsive: true,
     scales: {
@@ -149,6 +187,7 @@ function fmtTables(scenario, tables) {
       <td>${cur ?? '-'}</td>
       <td>${delta > 0 ? '+' + delta : ''}</td>
       <td>${m.latency_seconds !== null && m.latency_seconds !== undefined ? m.latency_seconds.toFixed(1) + 's' : '-'}</td>
+      <td>${m.backlog ?? '-'}</td>
     </tr>`;
   }
   return rows;
@@ -240,11 +279,18 @@ async function refresh() {
       if (latencyHistory[s].length > MAX_POINTS) latencyHistory[s].shift();
     }
 
+    const res = sc.resources || {};
+    const cpuTxt = res.cpu_percent !== null && res.cpu_percent !== undefined ? res.cpu_percent.toFixed(1) + '%' : '–';
+    const memTxt = res.memory_mb !== null && res.memory_mb !== undefined ? res.memory_mb.toFixed(0) + ' MB' : '–';
+    const procCount = res.process_count || 0;
+    const sessionCount = res.sessions || 0;
+
     html += `<div class="card">
       <h2>Scenario ${s} <span class="tag">${runningCount}/${jobCount} jobs running</span></h2>
       <div class="metric-big">${totalRows}</div>
       <div class="metric-label">total rows in target tables</div>
-      <table><thead><tr><th>table</th><th>rows</th><th>Δ</th><th>latency</th></tr></thead>
+      <div class="metric-label">overhead: ${cpuTxt} CPU &middot; ${memTxt} &middot; ${procCount} process${procCount === 1 ? '' : 'es'} &middot; ${sessionCount} Teradata session${sessionCount === 1 ? '' : 's'}</div>
+      <table><thead><tr><th>table</th><th>rows</th><th>Δ</th><th>latency</th><th>backlog</th></tr></thead>
       <tbody>${fmtTables(s, tables)}</tbody></table>
       <table style="margin-top:8px;"><thead><tr><th>job</th><th>status</th><th>controls</th></tr></thead>
       <tbody>${fmtJobs(s, jobs)}</tbody></table>
@@ -252,8 +298,12 @@ async function refresh() {
   }
   document.getElementById('cards').innerHTML = html;
 
+  burstEvents = data.burst_events || [];
+
   chart.data.labels.push(label);
   if (chart.data.labels.length > MAX_POINTS) chart.data.labels.shift();
+  labelEpochs.push(Date.now());
+  if (labelEpochs.length > MAX_POINTS) labelEpochs.shift();
   SCENARIOS.forEach((s, i) => {
     chart.data.datasets[i].data = latencyHistory[s].slice();
     // pad to align with labels length

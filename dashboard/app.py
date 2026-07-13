@@ -16,9 +16,10 @@ from fastapi.staticfiles import StaticFiles
 # consumer-group protocol (JoinGroup/SyncGroup) - confirmed empirically, a running
 # TPT job's group never appears in `kafka-consumer-groups.sh --list`. So consumer
 # lag isn't observable through the standard admin API for these jobs; the
-# dashboard relies on job status (running/stopped) plus Teradata-side row counts
-# and latency instead, which are directly observable and are what Section 9's
-# "most persuasive number in the room" (latency) actually needs.
+# dashboard relies on job status (running/stopped) plus Teradata-side row counts,
+# latency, and landing-table backlog (rows not yet merged+purged, the closest
+# available proxy for lag) instead, which are directly observable and are what
+# Section 9's "most persuasive number in the room" (latency) actually needs.
 
 TD_HOST = os.getenv("TD_HOST", "192.168.1.205")
 TD_USER = os.getenv("TD_USER", "dbc")
@@ -35,6 +36,19 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 MERGE_NORMAL_INTERVAL = 3
 MERGE_FAST_INTERVAL = 1
+
+# Empirically confirmed (2026-07-13, against 192.168.1.205) across scenario
+# A/B/C job types: a TPT STREAM operator with no explicit MaxSessions
+# attribute opens exactly 2 Teradata sessions, regardless of how many
+# DATACONNECTOR PRODUCER operators feed it (verified for scenario B's
+# 5-producer job too). Session count is derived from job status rather than
+# a live DBC.SessionInfoV query because Teradata doesn't promptly release
+# sessions after a job's tbuild.exe is taskkill'd - a live query showed the
+# same 2 sessions still "open" 20+ seconds after the process was gone, which
+# would read as stale/inflated right at the "kill it, watch it recover" demo
+# beat. If a .tbuild script ever sets an explicit MaxSessions, this constant
+# needs revisiting.
+TPT_SESSIONS_PER_JOB = 2
 
 # --- Job registry: everything needed to launch/track/kill each TPT job ---
 JOBS = {
@@ -70,8 +84,11 @@ external_pids = {}  # job_name -> pid, for jobs discovered running but launched 
 merge_process = None  # Popen, if the merge loop was launched by this dashboard process
 merge_external_pid = None  # pid, if the merge loop is running but was launched elsewhere
 merge_interval = MERGE_NORMAL_INTERVAL  # best-known -IntervalSeconds of the running loop
-metrics = {"scenarios": {}, "merge_loop": {}, "updated_at": None}
+metrics = {"scenarios": {}, "merge_loop": {}, "updated_at": None, "burst_events": []}
 metrics_lock = threading.Lock()
+
+_cpu_samples = {}  # pid -> (timestamp, cumulative_cpu_100ns), for CPU% deltas across polls
+burst_events = []  # epoch-seconds of recent /api/burst triggers, for chart annotation
 
 CHECKPOINT_DIR = r"C:\Program Files\Teradata\client\20.00\Teradata Parallel Transporter\checkpoint"
 
@@ -138,30 +155,62 @@ def discover_external_processes():
     # have no Popen handle for them. Find TPT jobs by the `-j <job_name>`
     # argument each tbuild.exe was started with, and the merge loop by matching
     # its script name among running powershell.exe processes.
+    #
+    # WorkingSetSize/KernelModeTime/UserModeTime are pulled in the same call so
+    # the resource-overhead panel doesn't need a second round-trip; they're only
+    # meaningful (and only collected) for the actual tbuild.exe worker, not the
+    # powershell.exe wrapper that launched it, since that's what "the job costs
+    # this much CPU/memory" should reflect.
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process -Filter \"Name='tbuild.exe' OR Name='powershell.exe'\" "
-             "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+             "| Select-Object ProcessId,Name,CommandLine,WorkingSetSize,KernelModeTime,UserModeTime "
+             "| ConvertTo-Json -Compress"],
             capture_output=True, text=True, timeout=10,
         )
         data = json.loads(result.stdout or "[]")
         if isinstance(data, dict):
             data = [data]
     except Exception:
-        return {}, None, None
+        return {}, None, None, {}
     jobs_found = {}
+    resource_by_job = {}
     merge_pid, merge_interval_found = None, None
     for proc in data:
         cmdline = proc.get("CommandLine") or ""
         m = re.search(r"-j\s+(\S+)", cmdline)
         if m and m.group(1) in JOBS:
             jobs_found[m.group(1)] = proc.get("ProcessId")
+            if proc.get("Name") == "tbuild.exe":
+                resource_by_job[m.group(1)] = {
+                    "pid": proc.get("ProcessId"),
+                    "memory_mb": (proc.get("WorkingSetSize") or 0) / (1024 * 1024),
+                    "cpu_100ns": (proc.get("KernelModeTime") or 0) + (proc.get("UserModeTime") or 0),
+                }
         if "run_merge_loop.ps1" in cmdline:
             merge_pid = proc.get("ProcessId")
             im = re.search(r"-IntervalSeconds\s+(\d+)", cmdline)
             merge_interval_found = int(im.group(1)) if im else MERGE_NORMAL_INTERVAL
-    return jobs_found, merge_pid, merge_interval_found
+    return jobs_found, merge_pid, merge_interval_found, resource_by_job
+
+
+def cpu_percent(pid, cpu_100ns, now):
+    # Win32_Process's Kernel/UserModeTime are cumulative since process start
+    # (100ns units), not a live %, so CPU% has to be derived from the delta
+    # between two polls. Normalized by logical core count to match Task
+    # Manager's convention (100% = one fully-loaded core, not "all cores").
+    ncpu = os.cpu_count() or 1
+    prev = _cpu_samples.get(pid)
+    _cpu_samples[pid] = (now, cpu_100ns)
+    if not prev:
+        return 0.0
+    prev_t, prev_cpu = prev
+    dt = now - prev_t
+    dcpu = cpu_100ns - prev_cpu
+    if dt <= 0 or dcpu < 0:
+        return 0.0
+    return (dcpu / 1e7) / dt / ncpu * 100
 
 
 def job_status(job_name):
@@ -227,8 +276,16 @@ def poll_metrics():
     global external_pids, merge_external_pid, merge_interval
     while True:
         try:
-            jobs_found, found_merge_pid, found_merge_interval = discover_external_processes()
+            jobs_found, found_merge_pid, found_merge_interval, resource_by_job = discover_external_processes()
             external_pids = jobs_found
+            now = time.time()
+            job_resources = {
+                job_name: {
+                    "cpu_percent": round(cpu_percent(r["pid"], r["cpu_100ns"], now), 1),
+                    "memory_mb": round(r["memory_mb"], 1),
+                }
+                for job_name, r in resource_by_job.items()
+            }
             if merge_process is None:
                 merge_external_pid = found_merge_pid
                 if found_merge_interval:
@@ -264,26 +321,55 @@ def poll_metrics():
                     lat = parse_interval_seconds(rows[0][0]) if rows else None
                 except Exception:
                     lat = None
+                # Backlog: rows still sitting in the landing table, not yet
+                # merged+purged. TPT's Kafka Access Module doesn't join Kafka's
+                # consumer-group protocol so real consumer lag isn't observable
+                # (see README "Known limitations") - this is the closest
+                # available proxy for "is this pipeline falling behind."
+                try:
+                    rows2 = td_query(cur, f"SELECT COUNT(*) FROM {landing}")
+                    backlog = rows2[0][0] if rows2 else None
+                except Exception:
+                    backlog = None
                 if table_key == "*":
                     for t in scenarios[scenario]["tables"]:
                         scenarios[scenario]["tables"][t]["latency_seconds"] = lat
+                        scenarios[scenario]["tables"][t]["backlog"] = backlog
                 elif table_key == "warm":
                     for t in ["customer", "account", "card", "payment"]:
                         scenarios[scenario]["tables"].setdefault(t, {})["latency_seconds"] = lat
+                        scenarios[scenario]["tables"].setdefault(t, {})["backlog"] = backlog
                 else:
                     scenarios[scenario]["tables"].setdefault(table_key, {})["latency_seconds"] = lat
+                    scenarios[scenario]["tables"].setdefault(table_key, {})["backlog"] = backlog
 
             con.close()
 
             for job_name, spec in JOBS.items():
+                res = job_resources.get(job_name)
                 scenarios[spec["scenario"]].setdefault("jobs", {})[job_name] = {
                     "status": job_status(job_name),
+                    "cpu_percent": res["cpu_percent"] if res else None,
+                    "memory_mb": res["memory_mb"] if res else None,
+                }
+
+            for scenario, sc in scenarios.items():
+                jobs = sc.get("jobs", {})
+                cpu_vals = [j["cpu_percent"] for j in jobs.values() if j["cpu_percent"] is not None]
+                mem_vals = [j["memory_mb"] for j in jobs.values() if j["memory_mb"] is not None]
+                running_count = sum(1 for j in jobs.values() if j["status"] == "running")
+                sc["resources"] = {
+                    "cpu_percent": round(sum(cpu_vals), 1) if cpu_vals else None,
+                    "memory_mb": round(sum(mem_vals), 1) if mem_vals else None,
+                    "process_count": len(mem_vals),
+                    "sessions": running_count * TPT_SESSIONS_PER_JOB,
                 }
 
             with metrics_lock:
                 metrics["scenarios"] = scenarios
                 metrics["merge_loop"] = {"status": merge_loop_status(), "interval": merge_interval}
                 metrics["updated_at"] = time.time()
+                metrics["burst_events"] = burst_events[-20:]
         except Exception as e:
             print("poll_metrics error:", e)
         time.sleep(POLL_INTERVAL)
@@ -312,6 +398,8 @@ def api_metrics():
 def api_burst():
     try:
         r = requests.post(f"{LOAD_GEN_URL}/burst", timeout=5)
+        burst_events.append(time.time())
+        del burst_events[:-20]
         return r.json()
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
