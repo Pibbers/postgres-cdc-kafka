@@ -176,7 +176,8 @@
 
   <h2>What to expect on the dashboard</h2>
   <p>
-    The <strong>Scenario B</strong> card shows a job-count badge of <code>1/1 jobs running</code> and a single row in the
+    The <strong>Scenario B</strong> card shows a job-count badge of <code>1/1 jobs running</code>, an overhead readout of
+    1 process and 2 Teradata sessions (versus Scenario A's 5 and 10 for the same 5 tables), and a single row in the
     jobs table — <span class="job-name">demo_b_all</span> — with one set of start/kill/restart buttons. The per-table
     row-delta breakdown still shows all 5 tables individually (the fan-out merge keeps that granularity downstream), even
     though there's only one job and one landing table feeding it.

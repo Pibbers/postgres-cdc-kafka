@@ -66,6 +66,18 @@
   nav.topnav a.active { color: #fff; font-weight: 600; border-bottom-color: var(--orange); }
   .chart-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 18px 20px; margin-top: 16px; }
   .chart-card h2 { margin: 0 0 14px; font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.70); }
+  .ticker { max-height: 260px; overflow-y: auto; }
+  .ticker-empty { color: rgba(255,255,255,0.35); font-size: 12.5px; padding: 6px 4px; }
+  .ticker-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12.5px; animation: tickerIn 0.4s ease; }
+  .ticker-row:last-child { border-bottom: none; }
+  @keyframes tickerIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+  .ticker-table { color: rgba(255,255,255,0.85); font-weight: 600; text-transform: capitalize; min-width: 82px; }
+  .ticker-pk { color: rgba(255,255,255,0.50); min-width: 56px; }
+  .ticker-op { color: rgba(255,255,255,0.55); min-width: 64px; }
+  .ticker-arrow { color: rgba(255,255,255,0.30); }
+  .ticker-badges { display: flex; gap: 6px; }
+  .ticker-badge { font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.30); background: rgba(255,255,255,0.04); transition: background 0.2s, color 0.2s, border-color 0.2s; }
+  .ticker-time { margin-left: auto; color: rgba(255,255,255,0.30); font-size: 11px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -87,6 +99,10 @@
     <button onclick="burst()">Burst transaction load</button>
     <span id="bulk-status"></span>
     <span id="burst-status"></span>
+  </div>
+  <div class="chart-card" style="margin-top: 0;">
+    <h2>Live CDC event feed &mdash; same source change landing across A / B / C</h2>
+    <div class="ticker" id="ticker"></div>
   </div>
   <div class="row" id="cards"></div>
   <div class="chart-card">
@@ -193,6 +209,40 @@ function fmtTables(scenario, tables) {
   return rows;
 }
 
+const SCENARIO_COLOR = { A: '#04CE7E', B: '#C4B7F1', C: '#FF5F02' };
+const OP_LABEL = { c: 'created', u: 'updated', d: 'deleted', r: 'loaded' };
+
+function fmtAgo(epochSec) {
+  const d = Date.now() / 1000 - epochSec;
+  if (d < 1.5) return 'just now';
+  if (d < 60) return Math.floor(d) + 's ago';
+  return Math.floor(d / 60) + 'm ago';
+}
+
+function renderTicker(events) {
+  const el = document.getElementById('ticker');
+  if (!events || !events.length) {
+    el.innerHTML = '<div class="ticker-empty">waiting for CDC events&hellip;</div>';
+    return;
+  }
+  el.innerHTML = events.map(e => {
+    const landedSet = new Set((e.landed || []).map(pair => pair[0]));
+    const badges = ['A', 'B', 'C'].map(s => {
+      const on = landedSet.has(s);
+      const style = on ? `background:${SCENARIO_COLOR[s]}22;color:${SCENARIO_COLOR[s]};border-color:${SCENARIO_COLOR[s]}88` : '';
+      return `<span class="ticker-badge" style="${style}">${s}${on ? ' &check;' : ''}</span>`;
+    }).join('');
+    return `<div class="ticker-row">
+      <span class="ticker-table">${e.table}</span>
+      <span class="ticker-pk">#${e.pk}</span>
+      <span class="ticker-op">${OP_LABEL[e.op] || e.op}</span>
+      <span class="ticker-arrow">&rarr;</span>
+      <span class="ticker-badges">${badges}</span>
+      <span class="ticker-time">${fmtAgo(e.activity)}</span>
+    </div>`;
+  }).join('');
+}
+
 function fmtJobs(scenario, jobs) {
   let rows = '';
   for (const [name, j] of Object.entries(jobs || {})) {
@@ -297,6 +347,8 @@ async function refresh() {
     </div>`;
   }
   document.getElementById('cards').innerHTML = html;
+
+  renderTicker(data.event_log || []);
 
   burstEvents = data.burst_events || [];
 

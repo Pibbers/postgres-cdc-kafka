@@ -79,16 +79,38 @@ TARGET_TABLES = {
     ("C", "payment"): "DEMO_C.PAYMENT", ("C", "transaction"): 'DEMO_C."TRANSACTION"',
 }
 
+PK_COLUMNS = {
+    "customer": "customer_id", "account": "account_id", "card": "card_id",
+    "payment": "payment_id", "transaction": "transaction_id",
+}
+ALL_SCENARIOS = ["A", "B", "C"]
+
+# Event ticker tuning: all 3 scenarios ingest the same 5 Postgres tables, so
+# the same source change lands independently in each. A group stays "live"
+# (still collecting scenario landings) until either all 3 have landed or
+# EVENT_GROUP_IDLE_SECONDS passes with no new landing - the latter lets a
+# group that will never complete (e.g. a scenario's job was killed for the
+# isolation demo beat) still finalize into the feed instead of hanging open.
+EVENT_GROUP_IDLE_SECONDS = 10
+EVENT_LOG_MAX = 60
+
 processes = {}  # job_name -> Popen, for jobs this dashboard process launched itself
 external_pids = {}  # job_name -> pid, for jobs discovered running but launched elsewhere
 merge_process = None  # Popen, if the merge loop was launched by this dashboard process
 merge_external_pid = None  # pid, if the merge loop is running but was launched elsewhere
 merge_interval = MERGE_NORMAL_INTERVAL  # best-known -IntervalSeconds of the running loop
-metrics = {"scenarios": {}, "merge_loop": {}, "updated_at": None, "burst_events": []}
+metrics = {"scenarios": {}, "merge_loop": {}, "updated_at": None, "burst_events": [], "event_log": []}
 metrics_lock = threading.Lock()
 
 _cpu_samples = {}  # pid -> (timestamp, cumulative_cpu_100ns), for CPU% deltas across polls
 burst_events = []  # epoch-seconds of recent /api/burst triggers, for chart annotation
+
+# Event ticker state - all mutated only from the single poll_metrics thread,
+# same as external_pids/merge_interval above, so no lock needed for these
+# themselves (only the final snapshot copied into `metrics` needs the lock).
+event_last_seen = {}  # (scenario, table) -> last td_update_ts processed, for incremental polling
+event_groups = {}     # (table, pk) -> {"op":, "landed": {scenario: epoch_seen}}, still collecting landings
+event_log = []         # finalized groups, newest first, capped at EVENT_LOG_MAX
 
 CHECKPOINT_DIR = r"C:\Program Files\Teradata\client\20.00\Teradata Parallel Transporter\checkpoint"
 
@@ -305,6 +327,39 @@ def poll_metrics():
                 scenarios[scenario]["tables"].setdefault(table, {})["row_count"] = count
                 scenarios[scenario]["tables"][table]["max_td_update_ts"] = str(max_ts) if max_ts else None
 
+                # Event ticker: pick up rows that changed since the last poll so the
+                # feed can show "customer 4821 updated -> landed in B, A, C" as each
+                # scenario's independent merge catches up to the same source change.
+                ekey = (scenario, table)
+                last_seen = event_last_seen.get(ekey)
+                try:
+                    if last_seen is None:
+                        # First poll for this (scenario, table): establish a baseline
+                        # instead of replaying the whole table's history as one burst.
+                        event_last_seen[ekey] = max_ts
+                    else:
+                        pk_col = PK_COLUMNS[table]
+                        new_rows = td_query(cur, f"""
+                            SELECT TOP 30 {pk_col}, cdc_operation_cd, td_update_ts
+                            FROM {target}
+                            WHERE td_update_ts > TIMESTAMP '{last_seen}'
+                            ORDER BY td_update_ts
+                        """)
+                        if new_rows:
+                            seen_at = time.time()
+                            for pk_val, op_code, _td_ts in new_rows:
+                                # cdc_operation_cd is CHAR(1) but the teradatasql driver
+                                # returns it space-padded (e.g. "u ") - strip before using
+                                # it as a lookup key on the frontend.
+                                op_code = (op_code or "").strip()
+                                gkey = (table, pk_val)
+                                g = event_groups.setdefault(gkey, {"table": table, "pk": pk_val, "op": op_code, "landed": {}})
+                                g["op"] = op_code
+                                g["landed"][scenario] = seen_at
+                            event_last_seen[ekey] = new_rows[-1][2]
+                except Exception:
+                    pass
+
             # latency: latest row's landing latency per landing table
             for (scenario, table_key), landing in LANDING_TABLES.items():
                 ts_field_map = {"transaction": "transaction_ts", "payment": "payment_ts"}
@@ -345,6 +400,41 @@ def poll_metrics():
 
             con.close()
 
+            # Finalize event groups: once a group has landed in all 3 scenarios,
+            # or has gone quiet for a while (a scenario's job may be down for the
+            # kill/restart demo beat and will just never land), move it out of the
+            # live working set and into the capped history feed.
+            now_ts = time.time()
+            for gkey in list(event_groups.keys()):
+                g = event_groups[gkey]
+                last_activity = max(g["landed"].values())
+                complete = len(g["landed"]) >= len(ALL_SCENARIOS)
+                idle = (now_ts - last_activity) > EVENT_GROUP_IDLE_SECONDS
+                if complete or idle:
+                    finalized = event_groups.pop(gkey)
+                    event_log.insert(0, {
+                        "table": finalized["table"],
+                        "pk": finalized["pk"],
+                        "op": finalized["op"],
+                        "landed": sorted(finalized["landed"].items(), key=lambda kv: kv[1]),
+                        "activity": last_activity,
+                    })
+            del event_log[EVENT_LOG_MAX:]
+
+            # Live groups still collecting landings are shown alongside recent
+            # history so the ticker reads as one continuous feed, checkmarks
+            # filling in as each scenario catches up rather than only appearing
+            # once a group is fully finalized.
+            live_entries = [
+                {
+                    "table": g["table"], "pk": g["pk"], "op": g["op"],
+                    "landed": sorted(g["landed"].items(), key=lambda kv: kv[1]),
+                    "activity": max(g["landed"].values()),
+                }
+                for g in event_groups.values()
+            ]
+            combined_events = sorted(live_entries + event_log, key=lambda e: e["activity"], reverse=True)[:EVENT_LOG_MAX]
+
             for job_name, spec in JOBS.items():
                 res = job_resources.get(job_name)
                 scenarios[spec["scenario"]].setdefault("jobs", {})[job_name] = {
@@ -370,6 +460,7 @@ def poll_metrics():
                 metrics["merge_loop"] = {"status": merge_loop_status(), "interval": merge_interval}
                 metrics["updated_at"] = time.time()
                 metrics["burst_events"] = burst_events[-20:]
+                metrics["event_log"] = combined_events
         except Exception as e:
             print("poll_metrics error:", e)
         time.sleep(POLL_INTERVAL)

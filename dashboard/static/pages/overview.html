@@ -136,11 +136,25 @@
 
   <h2>What you'll see on the live dashboard</h2>
   <p>
-    The <a href="/">dashboard</a> shows one card per scenario: how many of its jobs are running, total rows landed, a
-    per-table breakdown with row deltas and landing latency, and start/kill/restart controls for every job. Below the cards,
-    a single chart tracks end-to-end latency (source commit &rarr; Teradata landing) for all three scenarios at once — that
-    latency line is the single most persuasive number in the room, because it's the same underlying data hitting three
-    different pipelines simultaneously.
+    Above the cards, a live event ticker correlates individual CDC changes across all three pipelines — "customer 4821
+    updated &rarr; landed in B, A, C" — with a checkmark badge appearing per scenario as its independent merge catches
+    up to the same source row. It's the same "one source, three destinations" story as the latency chart, but at the
+    level of a single business event instead of an aggregate number.
+  </p>
+  <p>
+    The <a href="/">dashboard</a> shows one card per scenario: how many of its jobs are running, total rows landed, an
+    overhead readout (CPU%, memory, process count, and Teradata session count for that scenario's jobs), a per-table
+    breakdown with row deltas, landing latency, and landing-table backlog, and start/kill/restart controls for every job.
+    Below the cards, a single chart tracks end-to-end latency (source commit &rarr; Teradata landing) for all three
+    scenarios at once — that latency line is the single most persuasive number in the room, because it's the same
+    underlying data hitting three different pipelines simultaneously.
+  </p>
+  <p>
+    The overhead readout is where the isolation-vs-consolidation tradeoff stops being an abstract argument: Scenario A's
+    card shows 5 processes and 10 sessions running the same table set that Scenario B's card shows as 1 process and 2
+    sessions. Backlog (rows landed but not yet merged+purged) is the closest available proxy for consumer lag, since
+    TPT's Kafka Access Module doesn't join Kafka's consumer-group protocol and true lag isn't observable through the
+    standard admin API.
   </p>
   <p>
     Top-level <strong>"Start everything" / "Stop everything"</strong> buttons launch or kill all 8 TPT jobs plus the merge
@@ -151,9 +165,10 @@
   </p>
   <p>
     A <strong>burst load</strong> button spikes traffic (weighted toward <code>transaction</code>) so you can watch all three
-    scenarios respond to the same load spike side by side. Kill/restart buttons on individual jobs demonstrate the
-    isolation-vs-consolidation tradeoff directly: killing a Scenario A job stops only its one table; killing Scenario B's
-    single job stops all 5.
+    scenarios respond to the same load spike side by side — each trigger is marked with a dashed line directly on the
+    latency chart, so the room can see cause and effect without you having to narrate the timing. Kill/restart buttons on
+    individual jobs demonstrate the isolation-vs-consolidation tradeoff directly: killing a Scenario A job stops only its
+    one table; killing Scenario B's single job stops all 5.
   </p>
 
   <h2>What this maps back to</h2>
