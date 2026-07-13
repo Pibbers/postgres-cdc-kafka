@@ -1,0 +1,60 @@
+/*=============================================================
+  Scenario A: 1 topic -> 1 TPT job -> 1 landing table (account).
+  Consumes the raw Debezium JSON envelope from cdc.public.account and streams
+  each message, verbatim, into DEMO_A.ACCOUNT_LANDING.PAYLOAD.
+
+  Variables (substituted by run_tbuild.ps1 / run_tbuild.sh from the environment):
+    TD_HOST  TD_USER  TD_PASSWORD  TD_DATABASE
+    KAFKA_BOOTSTRAP  KAFKA_TOPIC  KAFKA_GROUP_ID  KAFKA_IDLE_TIMEOUT
+
+  Run with: tbuild -f <this, pre-substituted> -j demo_a_account -l 5 -z 10
+  -l 5 is mandatory: without it the STREAM operator only flushes at end-of-source,
+  which never arrives with a live producer, so zero rows would appear on screen.
+=============================================================*/
+
+DEFINE JOB DEMO_A_LOAD_ACCOUNT
+DESCRIPTION 'Scenario A: 1 topic -> 1 TPT job -> 1 target table (account)'
+(
+  DEFINE SCHEMA TXN_RAW_SCHEMA
+  (
+    PAYLOAD VARCHAR(16000)
+  );
+
+  DEFINE OPERATOR KAFKA_CONSUMER
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA TXN_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_account',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T $(KAFKA_TOPIC) -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR TD_INSERTER
+  TYPE STREAM
+  SCHEMA TXN_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).ACCOUNT_LANDING',
+    VARCHAR LogTable      = '$(TD_DATABASE).ACCOUNT_LANDING_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).ACCOUNT_LANDING_ET'
+  );
+
+  STEP MAIN_STEP
+  (
+    APPLY
+    (
+      'INSERT INTO $(TD_DATABASE).ACCOUNT_LANDING (PAYLOAD) VALUES (:PAYLOAD);'
+    )
+    TO OPERATOR (TD_INSERTER)
+    SELECT * FROM OPERATOR (KAFKA_CONSUMER);
+  );
+);

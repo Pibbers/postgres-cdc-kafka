@@ -1,0 +1,221 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scenario A — Kafka CDC → TPT → Teradata Demo</title>
+<link rel="stylesheet" href="/static/pages/common.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand"><div class="brand-dot"></div><span class="brand-name">Teradata</span></div>
+  <a href="/">Dashboard</a>
+  <a href="/static/pages/overview.html">Overview</a>
+  <a href="/static/pages/scenario-a.html" class="active">Scenario A</a>
+  <a href="/static/pages/scenario-b.html">Scenario B</a>
+  <a href="/static/pages/scenario-c.html">Scenario C</a>
+  <a href="/static/pages/scaling.html">Scaling to 500</a>
+  <span class="spacer"></span>
+  <a href="/" class="live-link">&#9679; Live dashboard</a>
+</nav>
+<div class="page">
+
+  <div class="eyebrow">Scenario A</div>
+  <h1>5 topics, 5 jobs, 5 of everything</h1>
+  <p class="subtitle">The "obvious" approach — and the one that doesn't scale.</p>
+
+  <div class="callout">
+    <p><strong>The pitch this scenario role-plays:</strong> "each table is a Kafka topic, so just give each topic its own ingestion job." It's the instinct almost everyone reaches for first, and at 5 tables it works beautifully — that's the point.</p>
+  </div>
+
+  <h2>Shape</h2>
+  <table>
+    <tbody>
+      <tr><td>Kafka topics</td><td>5 (<code>cdc.public.customer</code>, <code>account</code>, <code>card</code>, <code>payment</code>, <code>transaction</code>)</td></tr>
+      <tr><td>TPT jobs</td><td><strong>5</strong> — one per topic, one OS process each</td></tr>
+      <tr><td>Landing tables</td><td>5 — <code>DEMO_A.CUSTOMER_LANDING</code>, <code>ACCOUNT_LANDING</code>, <code>CARD_LANDING</code>, <code>PAYMENT_LANDING</code>, <code>TRANSACTION_LANDING</code></td></tr>
+      <tr><td>Target tables</td><td>5 — <code>DEMO_A.CUSTOMER</code>, <code>"ACCOUNT"</code>, <code>CARD</code>, <code>PAYMENT</code>, <code>"TRANSACTION"</code></td></tr>
+      <tr><td>Merge routines</td><td>5 — one idempotent MERGE per table, on its own polling loop</td></tr>
+    </tbody>
+  </table>
+
+  <h2>How it works</h2>
+
+  <!-- SVG topology diagram -->
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 760 220" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+      <defs>
+        <marker id="arr-a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(4,206,126,0.50)"/>
+        </marker>
+      </defs>
+
+      <!-- Column 1: 5 Kafka topics -->
+      <text x="68" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">KAFKA TOPICS</text>
+      <rect x="8" y="26" width="120" height="28" rx="6" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
+      <text x="68" y="44" text-anchor="middle" fill="#04CE7E" font-size="10.5">cdc.public.customer</text>
+      <rect x="8" y="60" width="120" height="28" rx="6" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
+      <text x="68" y="78" text-anchor="middle" fill="#04CE7E" font-size="10.5">cdc.public.account</text>
+      <rect x="8" y="94" width="120" height="28" rx="6" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
+      <text x="68" y="112" text-anchor="middle" fill="#04CE7E" font-size="10.5">cdc.public.card</text>
+      <rect x="8" y="128" width="120" height="28" rx="6" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
+      <text x="68" y="146" text-anchor="middle" fill="#04CE7E" font-size="10.5">cdc.public.payment</text>
+      <rect x="8" y="162" width="120" height="28" rx="6" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
+      <text x="68" y="180" text-anchor="middle" fill="#04CE7E" font-size="10.5">cdc.public.transaction</text>
+
+      <!-- Arrows 1 -->
+      <line x1="128" y1="40" x2="166" y2="40" stroke="rgba(4,206,126,0.35)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="128" y1="74" x2="166" y2="74" stroke="rgba(4,206,126,0.35)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="128" y1="108" x2="166" y2="108" stroke="rgba(4,206,126,0.35)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="128" y1="142" x2="166" y2="142" stroke="rgba(4,206,126,0.35)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="128" y1="176" x2="166" y2="176" stroke="rgba(4,206,126,0.35)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+
+      <!-- Column 2: 5 TPT jobs -->
+      <text x="228" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">TPT JOBS (tbuild)</text>
+      <rect x="168" y="26" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="228" y="44" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10">demo_a_customer</text>
+      <rect x="168" y="60" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="228" y="78" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10">demo_a_account</text>
+      <rect x="168" y="94" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="228" y="112" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10">demo_a_card</text>
+      <rect x="168" y="128" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="228" y="146" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10">demo_a_payment</text>
+      <rect x="168" y="162" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="228" y="180" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10">demo_a_transaction</text>
+
+      <!-- Arrows 2 -->
+      <line x1="288" y1="40" x2="326" y2="40" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="288" y1="74" x2="326" y2="74" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="288" y1="108" x2="326" y2="108" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="288" y1="142" x2="326" y2="142" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="288" y1="176" x2="326" y2="176" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+
+      <!-- Column 3: Landing tables -->
+      <text x="388" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">LANDING TABLES</text>
+      <rect x="328" y="26" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="388" y="44" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">CUSTOMER_LANDING</text>
+      <rect x="328" y="60" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="388" y="78" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">ACCOUNT_LANDING</text>
+      <rect x="328" y="94" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="388" y="112" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">CARD_LANDING</text>
+      <rect x="328" y="128" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="388" y="146" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">PAYMENT_LANDING</text>
+      <rect x="328" y="162" width="120" height="28" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="388" y="180" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">TRANSACTION_LANDING</text>
+
+      <!-- Merge label -->
+      <text x="468" y="108" text-anchor="middle" fill="rgba(255,255,255,0.25)" font-size="9" transform="rotate(-90,468,108)">MERGE ×5</text>
+
+      <!-- Arrows 3 -->
+      <line x1="448" y1="40" x2="486" y2="40" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="448" y1="74" x2="486" y2="74" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="448" y1="108" x2="486" y2="108" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="448" y1="142" x2="486" y2="142" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+      <line x1="448" y1="176" x2="486" y2="176" stroke="rgba(255,255,255,0.20)" stroke-width="1.2" marker-end="url(#arr-a)"/>
+
+      <!-- Column 4: Target tables -->
+      <text x="608" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">TARGET TABLES (DEMO_A)</text>
+      <rect x="488" y="26" width="240" height="28" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="608" y="44" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="10">DEMO_A.CUSTOMER</text>
+      <rect x="488" y="60" width="240" height="28" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="608" y="78" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="10">DEMO_A.ACCOUNT</text>
+      <rect x="488" y="94" width="240" height="28" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="608" y="112" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="10">DEMO_A.CARD</text>
+      <rect x="488" y="128" width="240" height="28" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="608" y="146" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="10">DEMO_A.PAYMENT</text>
+      <rect x="488" y="162" width="240" height="28" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="608" y="180" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="10">DEMO_A.TRANSACTION</text>
+
+      <!-- Teradata right-edge bar -->
+      <rect x="724" y="26" width="4" height="164" rx="2" fill="#FF5F02"/>
+    </svg>
+  </div>
+
+  <p>
+    Each job is completely independent end to end: its own Kafka consumer group, its own TPT process, its own landing table,
+    its own merge loop. Nothing is shared between the 5 pipelines except the source topics themselves.
+  </p>
+
+  <h3>What the tbuild script looks like (transaction table)</h3>
+  <div class="code-block">
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (Scenario A)</div>
+    <pre><span class="cm">-- One job: 1 Kafka reader + 1 Stream operator + 1 landing table</span>
+<span class="kw">DEFINE JOB</span> DEMO_A_LOAD_TRANSACTION
+<span class="kw">DESCRIPTION</span> <span class="st">'Scenario A: 1 topic -> 1 TPT job -> 1 target table (transaction)'</span>
+(
+  <span class="kw">DEFINE SCHEMA</span> TXN_RAW_SCHEMA ( <span class="ty">PAYLOAD VARCHAR</span>(16000) );
+
+  <span class="kw">DEFINE OPERATOR</span> KAFKA_CONSUMER
+  <span class="ty">TYPE DATACONNECTOR PRODUCER</span>
+  <span class="kw">SCHEMA</span> TXN_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> (
+    <span class="ty">VARCHAR</span> AccessModuleName    = <span class="st">'$(KAFKA_AXSMOD_NAME)'</span>,
+    <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T $(KAFKA_TOPIC) -B $(KAFKA_BOOTSTRAP)</span>
+<span class="st">                                    -P * -X group.id=$(KAFKA_GROUP_ID)</span>
+<span class="st">                                    -W $(KAFKA_IDLE_TIMEOUT)'</span>
+  );
+
+  <span class="kw">DEFINE OPERATOR</span> TD_INSERTER
+  <span class="ty">TYPE STREAM</span>
+  <span class="kw">SCHEMA</span> TXN_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> (
+    <span class="ty">VARCHAR</span> TdpId        = <span class="st">'$(TD_HOST)'</span>,
+    <span class="ty">VARCHAR</span> UserName     = <span class="st">'$(TD_USER)'</span>,
+    <span class="ty">VARCHAR</span> UserPassword = <span class="st">'$(TD_PASSWORD)'</span>,
+    <span class="ty">VARCHAR</span> TargetTable  = <span class="st">'$(TD_DATABASE).TRANSACTION_LANDING'</span>
+  );
+
+  <span class="kw">STEP</span> MAIN_STEP (
+    <span class="kw">APPLY</span> ( <span class="st">'INSERT INTO $(TD_DATABASE).TRANSACTION_LANDING (PAYLOAD) VALUES (:PAYLOAD);'</span> )
+    <span class="kw">TO OPERATOR</span> (TD_INSERTER)
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CONSUMER);
+  );
+);
+
+<span class="cm">-- Run with: tbuild -f load_transaction.tbuild -j demo_a_transaction -l 5 -z 10</span>
+<span class="cm">-- Repeat this entire file 4 more times for customer/account/card/payment.</span>
+<span class="cm">-- 5 files = 5 processes = 5 console windows.</span></pre>
+  </div>
+
+  <h3>What "job" means concretely</h3>
+  <p>
+    A job is a real <code>tbuild</code> process — e.g. <span class="job-name">demo_a_transaction</span> — running the Teradata
+    Kafka Access Module against one topic with a 5-second flush interval (<code>-l 5</code>, without which rows would buffer
+    forever and never appear) and 10-second checkpointing (<code>-z 10</code>). On this deployment these run as native
+    Windows processes, each in its own console window, so the room can literally count "5 windows, 5 jobs."
+  </p>
+
+  <h2>What to expect on the dashboard</h2>
+  <p>
+    The <strong>Scenario A</strong> card shows a job-count badge like <code>5/5 jobs running</code>, a per-table row-delta
+    table, and 5 rows in the jobs table — each with its own <strong>start / kill / restart</strong> buttons. This is the only
+    scenario where those buttons act on 5 independently-addressable things instead of 1 or 2.
+  </p>
+
+  <div class="callout info">
+    <p><strong>The isolation demo moment:</strong> click <em>kill</em> on <span class="job-name">demo_a_transaction</span>. Its row-delta
+    and latency go flat while <code>customer</code>/<code>account</code>/<code>card</code>/<code>payment</code> keep landing rows —
+    and so do Scenarios B and C entirely, since they're unaffected by anything happening in A. Click <em>restart</em>: the job
+    resumes and transaction rows start flowing again. This is genuinely Scenario A's strength: a failure in one table's pipeline
+    cannot touch another table's pipeline.</p>
+  </div>
+
+  <h2>Why this doesn't scale</h2>
+  <p>
+    That isolation is bought with process count. At 5 tables, 5 processes is completely manageable — a person can watch 5
+    console windows. At 500 tables, this pattern means <strong>500 independent <code>tbuild</code> processes</strong>, each
+    holding its own set of Teradata sessions, each needing its own monitoring, restart logic, and on-call runbook entry.
+  </p>
+  <p>
+    Worse, it doesn't just get operationally painful — it becomes <em>mechanically infeasible</em>: Teradata's per-PE and
+    per-gateway session ceilings mean only a fraction of 500 independent jobs can run concurrently on any real system size.
+    The rest queue, sometimes for hours. See the <a href="/static/pages/scaling.html">scaling page</a> for the exact numbers —
+    this is the load-bearing argument the whole demo is building toward.
+  </p>
+
+  <div class="pagenav">
+    <a href="/static/pages/overview.html">&larr; Overview</a>
+    <a href="/static/pages/scenario-b.html">Next: Scenario B &rarr;</a>
+  </div>
+</div>
+</body>
+</html>

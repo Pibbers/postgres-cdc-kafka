@@ -1,0 +1,68 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+DATABASE DEMO_C;
+
+/* Epoch-microseconds -> TIMESTAMP(6): Teradata's INTERVAL SECOND type caps at 4
+   leading digits (max 9999), so a raw epoch value (billions of seconds) overflows
+   it directly. Split into whole days (DATE arithmetic, unbounded), hours (0-23,
+   tiny), whole seconds within the hour (0-3599, fits), and fractional
+   microseconds (0-999999, fits) - each within INTERVAL's precision limits. */
+
+/* Snapshot a consistent cutoff so the final DELETE removes exactly the rows
+   this run actually processed, even if new rows land mid-script. */
+CREATE VOLATILE TABLE VT_BATCH_CUTOFF AS
+(
+    SELECT CURRENT_TIMESTAMP(6) AS CUTOFF_TS
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE VT_TRANSACTION_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".transaction_id AS BIGINT), CAST(PAYLOAD."before".transaction_id AS BIGINT)) AS transaction_id,
+        CAST(PAYLOAD."after".account_id AS BIGINT) AS account_id,
+        CAST(PAYLOAD."after".card_id AS BIGINT) AS card_id,
+        CAST(PAYLOAD."after".amount AS DECIMAL(12,2)) AS amount,
+        CAST(PAYLOAD."after".currency AS CHAR(3)) AS currency,
+        CAST(PAYLOAD."after".merchant AS VARCHAR(100)) AS merchant,
+        CAST(PAYLOAD."after".status AS VARCHAR(20)) AS status,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".transaction_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".transaction_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".transaction_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".transaction_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS transaction_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_C.TRANSACTION_LANDING
+    WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".transaction_id AS BIGINT), CAST(PAYLOAD."before".transaction_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_C."TRANSACTION" AS T
+USING VT_TRANSACTION_LATEST AS S
+ON T.transaction_id = S.transaction_id
+WHEN MATCHED THEN UPDATE SET
+    account_id = CASE WHEN S.operation_code = 'd' THEN T.account_id ELSE S.account_id END,
+    card_id = CASE WHEN S.operation_code = 'd' THEN T.card_id ELSE S.card_id END,
+    amount = CASE WHEN S.operation_code = 'd' THEN T.amount ELSE S.amount END,
+    currency = CASE WHEN S.operation_code = 'd' THEN T.currency ELSE S.currency END,
+    merchant = CASE WHEN S.operation_code = 'd' THEN T.merchant ELSE S.merchant END,
+    status = CASE WHEN S.operation_code = 'd' THEN T.status ELSE S.status END,
+    transaction_ts = CASE WHEN S.operation_code = 'd' THEN T.transaction_ts ELSE S.transaction_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (transaction_id, account_id, card_id, amount, currency, merchant, status, transaction_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.transaction_id, S.account_id, S.card_id, S.amount, S.currency, S.merchant, S.status, S.transaction_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_TRANSACTION_LATEST;
+
+DELETE FROM DEMO_C.TRANSACTION_LANDING
+WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF);
+
+DROP TABLE VT_BATCH_CUTOFF;
+
+.LOGOFF;
+.QUIT;

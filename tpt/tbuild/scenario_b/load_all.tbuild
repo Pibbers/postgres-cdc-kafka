@@ -1,0 +1,132 @@
+/*=============================================================
+  Scenario B: 5 topics -> 1 TPT job -> 1 landing table, fan-out merge downstream.
+  One DataConnector Producer operator per topic (each attaches its own copy of the
+  Kafka Access Module), combined via UNION ALL feeding a single Stream operator -
+  the same mechanism TPT uses for multi-partition parallelism, extended here from
+  "one instance per partition of one topic" to "one instance per topic" (spec
+  Section 8.2 / Open Item #3 - this is the one genuinely unproven shape, tested
+  live below). source_table is NOT stamped by the producer (unlike the spec's
+  original sketch) - it's parsed from the JSON envelope's own source.table field
+  at merge time, since the full envelope is already landed verbatim.
+
+  Variables (substituted by run_tbuild.ps1 / run_tbuild.sh from the environment):
+    TD_HOST  TD_USER  TD_PASSWORD  TD_DATABASE
+    KAFKA_BOOTSTRAP  KAFKA_GROUP_ID  KAFKA_IDLE_TIMEOUT
+
+  Run with: tbuild -f <this, pre-substituted> -j demo_b_all -l 5 -z 10
+=============================================================*/
+
+DEFINE JOB DEMO_B_LOAD_ALL
+DESCRIPTION 'Scenario B: 5 topics -> 1 TPT job -> 1 landing table -> fan-out merge'
+(
+  DEFINE SCHEMA CDC_RAW_SCHEMA
+  (
+    PAYLOAD VARCHAR(16000)
+  );
+
+  DEFINE OPERATOR KAFKA_CUSTOMER
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_customer',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.customer -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_ACCOUNT
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_account',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.account -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_CARD
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_card',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.card -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_PAYMENT
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_payment',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.payment -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_TRANSACTION
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_transaction',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.transaction -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR TD_INSERTER
+  TYPE STREAM
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).CDC_LANDING',
+    VARCHAR LogTable      = '$(TD_DATABASE).CDC_LANDING_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).CDC_LANDING_ET'
+  );
+
+  STEP MAIN_STEP
+  (
+    APPLY
+    (
+      'INSERT INTO $(TD_DATABASE).CDC_LANDING (PAYLOAD) VALUES (:PAYLOAD);'
+    )
+    TO OPERATOR (TD_INSERTER)
+    SELECT * FROM OPERATOR (KAFKA_CUSTOMER)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_ACCOUNT)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_CARD)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_PAYMENT)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_TRANSACTION);
+  );
+);

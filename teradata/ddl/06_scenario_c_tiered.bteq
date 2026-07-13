@@ -1,0 +1,29 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+.SET ERRORLEVEL 3803 SEVERITY 0   /* "already exists" */
+.SET ERRORLEVEL 3807 SEVERITY 0   /* "table does not exist" (DROP TABLE on one we never created) */
+.SET ERRORLEVEL 5495 SEVERITY 0   /* "stored procedure does not exist" (DROP PROCEDURE - separate code from 3807) */
+
+DATABASE DEMO_C;
+
+/* Superseded by the tiered design: transaction (hot) gets its own dedicated job/
+   landing table (unchanged, reused from the original design); customer/account/
+   card/payment (warm/cold) now share ONE consolidated job + landing table,
+   mirroring Scenario B, instead of 4 separate per-table landing tables. */
+
+DROP TABLE DEMO_C.CUSTOMER_LANDING;
+DROP TABLE DEMO_C.ACCOUNT_LANDING;
+DROP TABLE DEMO_C.CARD_LANDING;
+DROP TABLE DEMO_C.PAYMENT_LANDING;
+
+CREATE MULTISET TABLE DEMO_C.WARM_LANDING
+(
+    PAYLOAD        JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+    PROCESSED_IND  BYTEINT DEFAULT 0
+) NO PRIMARY INDEX;
+
+DROP PROCEDURE DEMO_C.SP_ROUTE_LANDING;
+
+.LOGOFF;
+.QUIT;

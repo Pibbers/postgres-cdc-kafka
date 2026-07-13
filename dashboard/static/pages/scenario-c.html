@@ -1,0 +1,206 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scenario C — Kafka CDC → TPT → Teradata Demo</title>
+<link rel="stylesheet" href="/static/pages/common.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand"><div class="brand-dot"></div><span class="brand-name">Teradata</span></div>
+  <a href="/">Dashboard</a>
+  <a href="/static/pages/overview.html">Overview</a>
+  <a href="/static/pages/scenario-a.html">Scenario A</a>
+  <a href="/static/pages/scenario-b.html">Scenario B</a>
+  <a href="/static/pages/scenario-c.html" class="active">Scenario C</a>
+  <a href="/static/pages/scaling.html">Scaling to 500</a>
+  <span class="spacer"></span>
+  <a href="/" class="live-link">&#9679; Live dashboard</a>
+</nav>
+<div class="page">
+
+  <div class="eyebrow">Scenario C</div>
+  <h1>Tiered: isolate the hot table, consolidate the rest</h1>
+  <p class="subtitle">The middle ground — for the customer who says "but I need per-table isolation for compliance."</p>
+
+  <div class="callout">
+    <p><strong>The pitch this scenario proves:</strong> isolation and consolidation aren't mutually exclusive. Give the one
+    table that actually needs low-latency isolation its own job; consolidate everything else. This is the same
+    hot/warm/cold tiering the 500-table recommendation uses — just applied to 5 tables instead of 500.</p>
+  </div>
+
+
+  <h2>Shape</h2>
+  <table>
+    <tbody>
+      <tr><td>Kafka topics</td><td>5 (separate consumer groups per job)</td></tr>
+      <tr><td>TPT jobs</td><td><strong>2</strong> — 1 dedicated (hot) + 1 consolidated (warm/cold)</td></tr>
+      <tr><td>Landing tables</td><td>2 — <code>DEMO_C.TRANSACTION_LANDING</code> (hot) and <code>DEMO_C.WARM_LANDING</code> (shared by 4 tables)</td></tr>
+      <tr><td>Target tables</td><td>5 — all under <code>DEMO_C</code>, same DDL shape as A and B</td></tr>
+      <tr><td>Merge routines</td><td>2 — one dedicated MERGE for <code>transaction</code>, one fan-out MERGE for the other 4</td></tr>
+    </tbody>
+  </table>
+
+  <h2>How it works</h2>
+
+  <!-- SVG tiered topology diagram -->
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 780 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+      <defs>
+        <marker id="arr-c" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(255,170,102,0.50)"/>
+        </marker>
+        <marker id="arr-c2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(196,183,241,0.50)"/>
+        </marker>
+      </defs>
+
+      <!-- Tier labels -->
+      <text x="4" y="32" fill="rgba(255,170,102,0.70)" font-size="9" font-weight="600" letter-spacing="0.06em">HOT TIER</text>
+      <text x="4" y="152" fill="rgba(196,183,241,0.70)" font-size="9" font-weight="600" letter-spacing="0.06em">WARM TIER</text>
+
+      <!-- Hot tier: 1 topic -->
+      <rect x="8" y="40" width="120" height="26" rx="5" fill="rgba(255,95,2,0.12)" stroke="rgba(255,95,2,0.35)" stroke-width="1"/>
+      <text x="68" y="57" text-anchor="middle" fill="#ffaa66" font-size="10">cdc.public.transaction</text>
+
+      <!-- Hot job -->
+      <line x1="128" y1="53" x2="168" y2="53" stroke="rgba(255,170,102,0.40)" stroke-width="1.2" marker-end="url(#arr-c)"/>
+      <rect x="170" y="38" width="122" height="30" rx="6" fill="rgba(255,95,2,0.10)" stroke="rgba(255,95,2,0.30)" stroke-width="1.5"/>
+      <text x="231" y="53" text-anchor="middle" fill="#ffaa66" font-size="10" font-weight="600">demo_c_transaction</text>
+      <text x="231" y="64" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="8.5">1 job, dedicated</text>
+
+      <!-- Hot landing -->
+      <line x1="292" y1="53" x2="332" y2="53" stroke="rgba(255,170,102,0.30)" stroke-width="1.2" marker-end="url(#arr-c)"/>
+      <rect x="334" y="38" width="120" height="30" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="394" y="53" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">TRANSACTION_LANDING</text>
+      <text x="394" y="64" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="8.5">DEMO_C</text>
+
+      <!-- Hot target -->
+      <line x1="454" y1="53" x2="494" y2="53" stroke="rgba(255,170,102,0.25)" stroke-width="1.2" marker-end="url(#arr-c)"/>
+      <rect x="496" y="38" width="220" height="30" rx="6" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="606" y="57" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_C.TRANSACTION</text>
+      <rect x="712" y="38" width="4" height="30" rx="2" fill="#FF5F02"/>
+
+      <!-- Divider -->
+      <line x1="8" y1="135" x2="772" y2="135" stroke="rgba(255,255,255,0.06)" stroke-width="1" stroke-dasharray="4,4"/>
+
+      <!-- Warm tier: 4 topics -->
+      <rect x="8" y="158" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.25)" stroke-width="1"/>
+      <text x="68" y="174" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.customer</text>
+      <rect x="8" y="188" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.25)" stroke-width="1"/>
+      <text x="68" y="204" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.account</text>
+      <rect x="8" y="218" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.25)" stroke-width="1"/>
+      <text x="68" y="234" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.card</text>
+      <rect x="8" y="248" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.25)" stroke-width="1"/>
+      <text x="68" y="264" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.payment</text>
+
+      <!-- Fan-in warm -->
+      <line x1="128" y1="170" x2="170" y2="210" stroke="rgba(196,183,241,0.25)" stroke-width="1.2"/>
+      <line x1="128" y1="200" x2="170" y2="210" stroke="rgba(196,183,241,0.25)" stroke-width="1.2"/>
+      <line x1="128" y1="230" x2="170" y2="210" stroke="rgba(196,183,241,0.25)" stroke-width="1.2"/>
+      <line x1="128" y1="260" x2="170" y2="210" stroke="rgba(196,183,241,0.25)" stroke-width="1.2"/>
+
+      <!-- Warm job -->
+      <rect x="170" y="195" width="122" height="30" rx="6" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.30)" stroke-width="1.5"/>
+      <text x="231" y="210" text-anchor="middle" fill="#C4B7F1" font-size="10" font-weight="600">demo_c_warm</text>
+      <text x="231" y="221" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="8.5">1 job, UNION ALL (4 topics)</text>
+
+      <!-- Warm landing -->
+      <line x1="292" y1="210" x2="332" y2="210" stroke="rgba(196,183,241,0.30)" stroke-width="1.2" marker-end="url(#arr-c2)"/>
+      <rect x="334" y="195" width="120" height="30" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="394" y="210" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">WARM_LANDING</text>
+      <text x="394" y="221" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="8.5">DEMO_C</text>
+
+      <!-- Fan-out warm -->
+      <line x1="454" y1="210" x2="496" y2="178" stroke="rgba(255,95,2,0.20)" stroke-width="1.2"/>
+      <line x1="454" y1="210" x2="496" y2="198" stroke="rgba(255,95,2,0.20)" stroke-width="1.2"/>
+      <line x1="454" y1="210" x2="496" y2="218" stroke="rgba(255,95,2,0.20)" stroke-width="1.2"/>
+      <line x1="454" y1="210" x2="496" y2="238" stroke="rgba(255,95,2,0.20)" stroke-width="1.2"/>
+
+      <!-- Warm targets -->
+      <rect x="496" y="166" width="220" height="24" rx="5" fill="rgba(255,95,2,0.07)" stroke="rgba(255,95,2,0.18)" stroke-width="1"/>
+      <text x="606" y="182" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="9.5">DEMO_C.CUSTOMER</text>
+      <rect x="496" y="196" width="220" height="24" rx="5" fill="rgba(255,95,2,0.07)" stroke="rgba(255,95,2,0.18)" stroke-width="1"/>
+      <text x="606" y="212" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="9.5">DEMO_C.ACCOUNT</text>
+      <rect x="496" y="226" width="220" height="24" rx="5" fill="rgba(255,95,2,0.07)" stroke="rgba(255,95,2,0.18)" stroke-width="1"/>
+      <text x="606" y="242" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="9.5">DEMO_C.CARD</text>
+      <rect x="496" y="256" width="220" height="24" rx="5" fill="rgba(255,95,2,0.07)" stroke="rgba(255,95,2,0.18)" stroke-width="1"/>
+      <text x="606" y="272" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="9.5">DEMO_C.PAYMENT</text>
+      <rect x="712" y="166" width="4" height="114" rx="2" fill="#FF5F02"/>
+    </svg>
+  </div>
+
+  <h3>What the tbuild scripts look like</h3>
+  <div class="code-block">
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (hot tier, Scenario C)</div>
+    <pre><span class="cm">-- Hot tier: structurally identical to Scenario A's per-table job</span>
+<span class="kw">DEFINE JOB</span> DEMO_C_LOAD_TRANSACTION
+<span class="kw">DESCRIPTION</span> <span class="st">'Scenario C hot tier: transaction gets its own dedicated job'</span>
+(
+  <span class="kw">DEFINE SCHEMA</span> TXN_RAW_SCHEMA ( <span class="ty">PAYLOAD VARCHAR</span>(16000) );
+  <span class="kw">DEFINE OPERATOR</span> KAFKA_CONSUMER <span class="ty">TYPE DATACONNECTOR PRODUCER</span> <span class="kw">SCHEMA</span> TXN_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T cdc.public.transaction -B $(KAFKA_BOOTSTRAP)
+                                         -P * -X group.id=$(KAFKA_GROUP_ID_HOT)'</span> );
+  <span class="kw">DEFINE OPERATOR</span> TD_INSERTER <span class="ty">TYPE STREAM</span> <span class="kw">SCHEMA</span> TXN_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> TargetTable = <span class="st">'$(TD_DATABASE).TRANSACTION_LANDING'</span> );
+  <span class="kw">STEP</span> MAIN_STEP (
+    <span class="kw">APPLY</span> ( <span class="st">'INSERT INTO $(TD_DATABASE).TRANSACTION_LANDING (PAYLOAD) VALUES (:PAYLOAD);'</span> )
+    <span class="kw">TO OPERATOR</span> (TD_INSERTER) <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CONSUMER);
+  );
+);
+<span class="cm">-- tbuild -f load_transaction.tbuild -j demo_c_transaction -l 5 -z 10</span></pre>
+  </div>
+  <div class="code-block">
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_warm.tbuild (warm/cold tier, Scenario C)</div>
+    <pre><span class="cm">-- Warm tier: structurally identical to Scenario B (4 topics UNION ALL'd)</span>
+<span class="kw">DEFINE JOB</span> DEMO_C_LOAD_WARM
+<span class="kw">DESCRIPTION</span> <span class="st">'Scenario C warm tier: 4 topics -> 1 job -> WARM_LANDING -> fan-out merge'</span>
+(
+  <span class="kw">DEFINE SCHEMA</span> CDC_RAW_SCHEMA ( <span class="ty">PAYLOAD VARCHAR</span>(16000) );
+  <span class="cm">-- KAFKA_CUSTOMER, KAFKA_ACCOUNT, KAFKA_CARD, KAFKA_PAYMENT defined as in Scenario B</span>
+  <span class="kw">DEFINE OPERATOR</span> TD_INSERTER <span class="ty">TYPE STREAM</span> <span class="kw">SCHEMA</span> CDC_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> TargetTable = <span class="st">'$(TD_DATABASE).WARM_LANDING'</span> );
+  <span class="kw">STEP</span> MAIN_STEP (
+    <span class="kw">APPLY</span> ( <span class="st">'INSERT INTO $(TD_DATABASE).WARM_LANDING (PAYLOAD) VALUES (:PAYLOAD);'</span> )
+    <span class="kw">TO OPERATOR</span> (TD_INSERTER)
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CUSTOMER)
+    <span class="op">UNION ALL</span> <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_ACCOUNT)
+    <span class="op">UNION ALL</span> <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CARD)
+    <span class="op">UNION ALL</span> <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_PAYMENT);
+  );
+);
+<span class="cm">-- tbuild -f load_warm.tbuild -j demo_c_warm -l 5 -z 10</span>
+<span class="cm">-- Net result: 2 jobs total. Best of both patterns.</span></pre>
+  </div>
+
+  <h2>What to expect on the dashboard</h2>
+  <p>
+    The <strong>Scenario C</strong> card shows <code>2/2 jobs running</code> and two rows in the jobs table:
+    <span class="job-name">demo_c_transaction</span> and <span class="job-name">demo_c_warm</span>, each independently
+    startable/killable/restartable.
+  </p>
+  <div class="callout info">
+    <p><strong>Two isolation demo moments, not one:</strong> kill <span class="job-name">demo_c_transaction</span> and only
+    <code>transaction</code> stops (identical to Scenario A's isolation story). Kill <span class="job-name">demo_c_warm</span>
+    instead, and <code>customer</code>/<code>account</code>/<code>card</code>/<code>payment</code> all stop together
+    (identical to Scenario B's shared-fate story) while <code>transaction</code> keeps flowing untouched. Scenario C lets
+    you show both tradeoffs from Scenarios A and B within one topology, because it deliberately contains both patterns.
+  </p></div>
+
+  <h2>Why this is the answer to "we need isolation for compliance"</h2>
+  <p>
+    Scenario A shows full isolation but doesn't scale. Scenario B scales perfectly but has a single shared failure domain.
+    Scenario C shows that those aren't the only two options — isolation can be applied selectively, to just the tables
+    whose latency SLA actually demands it, while everything else consolidates. At 500 tables, this is the
+    <strong>tiered architecture</strong>: 10&ndash;20 hot tables each get a dedicated job, the remaining ~480 warm/cold
+    tables share one or a handful of consolidated jobs — landing around 22 total jobs instead of 500, comfortably within
+    any system's session capacity. See <a href="/static/pages/scaling.html">Scaling to 500</a> for the full numbers.
+  </p>
+
+  <div class="pagenav">
+    <a href="/static/pages/scenario-b.html">&larr; Scenario B</a>
+    <a href="/static/pages/scaling.html">Next: Scaling to 500 &rarr;</a>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,58 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+DATABASE DEMO_A;
+
+/* Snapshot a consistent cutoff so the final DELETE removes exactly the rows
+   this run actually processed, even if new rows land mid-script. */
+CREATE VOLATILE TABLE VT_BATCH_CUTOFF AS
+(
+    SELECT CURRENT_TIMESTAMP(6) AS CUTOFF_TS
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE VT_CARD_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".card_id AS BIGINT), CAST(PAYLOAD."before".card_id AS BIGINT)) AS card_id,
+        CAST(PAYLOAD."after".account_id AS BIGINT) AS account_id,
+        CAST(PAYLOAD."after".card_number_masked AS VARCHAR(20)) AS card_number_masked,
+        CAST(PAYLOAD."after".card_type AS VARCHAR(20)) AS card_type,
+        CAST(PAYLOAD."after".status AS VARCHAR(20)) AS status,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".updated_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS source_updated_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_A.CARD_LANDING
+    WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".card_id AS BIGINT), CAST(PAYLOAD."before".card_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_A.CARD AS T
+USING VT_CARD_LATEST AS S
+ON T.card_id = S.card_id
+WHEN MATCHED THEN UPDATE SET
+    account_id = CASE WHEN S.operation_code = 'd' THEN T.account_id ELSE S.account_id END,
+    card_number_masked = CASE WHEN S.operation_code = 'd' THEN T.card_number_masked ELSE S.card_number_masked END,
+    card_type = CASE WHEN S.operation_code = 'd' THEN T.card_type ELSE S.card_type END,
+    status = CASE WHEN S.operation_code = 'd' THEN T.status ELSE S.status END,
+    source_updated_ts = CASE WHEN S.operation_code = 'd' THEN T.source_updated_ts ELSE S.source_updated_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (card_id, account_id, card_number_masked, card_type, status, source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.card_id, S.account_id, S.card_number_masked, S.card_type, S.status, S.source_updated_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_CARD_LATEST;
+
+DELETE FROM DEMO_A.CARD_LANDING
+WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF);
+
+DROP TABLE VT_BATCH_CUTOFF;
+
+.LOGOFF;
+.QUIT;

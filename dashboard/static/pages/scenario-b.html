@@ -1,0 +1,208 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scenario B — Kafka CDC → TPT → Teradata Demo</title>
+<link rel="stylesheet" href="/static/pages/common.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand"><div class="brand-dot"></div><span class="brand-name">Teradata</span></div>
+  <a href="/">Dashboard</a>
+  <a href="/static/pages/overview.html">Overview</a>
+  <a href="/static/pages/scenario-a.html">Scenario A</a>
+  <a href="/static/pages/scenario-b.html" class="active">Scenario B</a>
+  <a href="/static/pages/scenario-c.html">Scenario C</a>
+  <a href="/static/pages/scaling.html">Scaling to 500</a>
+  <span class="spacer"></span>
+  <a href="/" class="live-link">&#9679; Live dashboard</a>
+</nav>
+<div class="page">
+
+  <div class="eyebrow">Scenario B</div>
+  <h1>5 topics, 1 job, fan-out at merge time</h1>
+  <p class="subtitle">The recommended production pattern — and what "500 tables" would actually look like mechanically.</p>
+
+  <div class="callout">
+    <p><strong>The pitch this scenario proves:</strong> one consolidated job can read every topic and land every table — and it handles 500 tables exactly the same way it handles 5, because the job count doesn't grow with table count.</p>
+  </div>
+
+  <h2>Shape</h2>
+  <table>
+    <tbody>
+      <tr><td>Kafka topics</td><td>5 (same topics as Scenario A — a separate consumer group, <code>tpt.demo_b</code>)</td></tr>
+      <tr><td>TPT jobs</td><td><strong>1</strong> — <span class="job-name">demo_b_all</span></td></tr>
+      <tr><td>Landing table</td><td><strong>1</strong> — <code>DEMO_B.CDC_LANDING</code>, shared by all 5 tables</td></tr>
+      <tr><td>Target tables</td><td>5 — <code>DEMO_B.CUSTOMER</code>, <code>"ACCOUNT"</code>, <code>CARD</code>, <code>PAYMENT</code>, <code>"TRANSACTION"</code></td></tr>
+      <tr><td>Merge routines</td><td><strong>1</strong> — a single fan-out merge that routes each landed row to its target table</td></tr>
+    </tbody>
+  </table>
+
+  <h2>How it works</h2>
+  <p>
+    The Kafka Access Module doesn't support subscribing one reader instance to multiple topics at once, so the job instead
+    declares <strong>5 separate <code>DATACONNECTOR PRODUCER</code> operators</strong> — one per topic — and combines all 5
+    with <code>UNION ALL</code> feeding a single, shared <code>STREAM</code> operator. All 5 readers are coordinated as one
+    Kafka consumer group. This is the same mechanism TPT normally uses to parallelize reads across partitions of one topic,
+    applied instead across 5 different topics.
+  </p>
+
+  <!-- SVG topology diagram: fan-in then fan-out -->
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 780 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+      <defs>
+        <marker id="arr-b" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(196,183,241,0.50)"/>
+        </marker>
+      </defs>
+
+      <!-- Column 1: Topics -->
+      <text x="68" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">KAFKA TOPICS</text>
+      <rect x="8" y="26" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="68" y="42" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.customer</text>
+      <rect x="8" y="56" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="68" y="72" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.account</text>
+      <rect x="8" y="86" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="68" y="102" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.card</text>
+      <rect x="8" y="116" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="68" y="132" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.payment</text>
+      <rect x="8" y="146" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="68" y="162" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.transaction</text>
+
+      <!-- Fan-in lines to UNION ALL -->
+      <line x1="128" y1="38" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+      <line x1="128" y1="68" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+      <line x1="128" y1="98" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+      <line x1="128" y1="128" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+      <line x1="128" y1="158" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+
+      <!-- UNION ALL / single job box -->
+      <rect x="196" y="74" width="130" height="52" rx="8" fill="rgba(196,183,241,0.12)" stroke="rgba(196,183,241,0.35)" stroke-width="1.5"/>
+      <text x="261" y="95" text-anchor="middle" fill="#C4B7F1" font-size="11" font-weight="600">UNION ALL</text>
+      <text x="261" y="112" text-anchor="middle" fill="rgba(255,255,255,0.50)" font-size="9.5">1 STREAM operator</text>
+      <text x="261" y="124" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">demo_b_all</text>
+
+      <!-- Arrow to landing -->
+      <line x1="326" y1="100" x2="370" y2="100" stroke="rgba(196,183,241,0.40)" stroke-width="1.5" marker-end="url(#arr-b)"/>
+
+      <!-- Single landing table -->
+      <rect x="372" y="74" width="128" height="52" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <text x="436" y="95" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10" font-weight="600">CDC_LANDING</text>
+      <text x="436" y="110" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5">DEMO_B.CDC_LANDING</text>
+      <text x="436" y="123" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="9">all 5 tables, 1 row stream</text>
+
+      <!-- Fan-out label -->
+      <text x="516" y="96" text-anchor="start" fill="rgba(255,255,255,0.20)" font-size="9">fan-out</text>
+      <text x="516" y="107" text-anchor="start" fill="rgba(255,255,255,0.20)" font-size="9">MERGE</text>
+
+      <!-- Fan-out lines -->
+      <line x1="500" y1="100" x2="568" y2="40" stroke="rgba(255,95,2,0.25)" stroke-width="1.2"/>
+      <line x1="500" y1="100" x2="568" y2="68" stroke="rgba(255,95,2,0.25)" stroke-width="1.2"/>
+      <line x1="500" y1="100" x2="568" y2="96" stroke="rgba(255,95,2,0.25)" stroke-width="1.2"/>
+      <line x1="500" y1="100" x2="568" y2="124" stroke="rgba(255,95,2,0.25)" stroke-width="1.2"/>
+      <line x1="500" y1="100" x2="568" y2="152" stroke="rgba(255,95,2,0.25)" stroke-width="1.2"/>
+
+      <!-- Target tables -->
+      <text x="700" y="18" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.05em">TARGET TABLES (DEMO_B)</text>
+      <rect x="568" y="26" width="200" height="24" rx="5" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="668" y="42" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_B.CUSTOMER</text>
+      <rect x="568" y="56" width="200" height="24" rx="5" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="668" y="72" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_B.ACCOUNT</text>
+      <rect x="568" y="86" width="200" height="24" rx="5" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="668" y="102" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_B.CARD</text>
+      <rect x="568" y="116" width="200" height="24" rx="5" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="668" y="132" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_B.PAYMENT</text>
+      <rect x="568" y="146" width="200" height="24" rx="5" fill="rgba(255,95,2,0.08)" stroke="rgba(255,95,2,0.22)" stroke-width="1"/>
+      <text x="668" y="162" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_B.TRANSACTION</text>
+
+      <!-- Teradata bar -->
+      <rect x="764" y="26" width="4" height="144" rx="2" fill="#FF5F02"/>
+    </svg>
+  </div>
+
+  <h3>What the tbuild script looks like</h3>
+  <div class="code-block">
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_all.tbuild (Scenario B)</div>
+    <pre><span class="cm">-- One job: 5 DATACONNECTOR PRODUCER operators UNION ALL'd into 1 STREAM</span>
+<span class="kw">DEFINE JOB</span> DEMO_B_LOAD_ALL
+<span class="kw">DESCRIPTION</span> <span class="st">'Scenario B: 5 topics -> 1 TPT job -> 1 landing table -> fan-out merge'</span>
+(
+  <span class="kw">DEFINE SCHEMA</span> CDC_RAW_SCHEMA ( <span class="ty">PAYLOAD VARCHAR</span>(16000) );
+
+  <span class="cm">-- One DATACONNECTOR PRODUCER per topic (Kafka Access Module instance each)</span>
+  <span class="kw">DEFINE OPERATOR</span> KAFKA_CUSTOMER <span class="ty">TYPE DATACONNECTOR PRODUCER</span> <span class="kw">SCHEMA</span> CDC_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T cdc.public.customer -B $(KAFKA_BOOTSTRAP)
+                                         -P * -X group.id=$(KAFKA_GROUP_ID)'</span> );
+
+  <span class="kw">DEFINE OPERATOR</span> KAFKA_ACCOUNT  <span class="ty">TYPE DATACONNECTOR PRODUCER</span> <span class="kw">SCHEMA</span> CDC_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T cdc.public.account  ...'</span> );
+
+  <span class="cm">-- ... KAFKA_CARD, KAFKA_PAYMENT, KAFKA_TRANSACTION defined identically ...</span>
+
+  <span class="kw">DEFINE OPERATOR</span> TD_INSERTER <span class="ty">TYPE STREAM</span> <span class="kw">SCHEMA</span> CDC_RAW_SCHEMA
+  <span class="kw">ATTRIBUTES</span> (
+    <span class="ty">VARCHAR</span> TdpId       = <span class="st">'$(TD_HOST)'</span>,
+    <span class="ty">VARCHAR</span> TargetTable = <span class="st">'$(TD_DATABASE).CDC_LANDING'</span>  <span class="cm">-- 1 shared landing table</span>
+  );
+
+  <span class="kw">STEP</span> MAIN_STEP (
+    <span class="kw">APPLY</span> ( <span class="st">'INSERT INTO $(TD_DATABASE).CDC_LANDING (PAYLOAD) VALUES (:PAYLOAD);'</span> )
+    <span class="kw">TO OPERATOR</span> (TD_INSERTER)
+    <span class="cm">-- All 5 readers combined as a single row stream:</span>
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CUSTOMER)
+    <span class="op">UNION ALL</span>
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_ACCOUNT)
+    <span class="op">UNION ALL</span>
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CARD)
+    <span class="op">UNION ALL</span>
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_PAYMENT)
+    <span class="op">UNION ALL</span>
+    <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_TRANSACTION);
+  );
+);
+
+<span class="cm">-- Run with: tbuild -f load_all.tbuild -j demo_b_all -l 5 -z 10</span>
+<span class="cm">-- 1 file = 1 process = 1 window. At 500 tables: still 1 job.</span></pre>
+  </div>
+
+  <h3>Where the "5 tables" distinction survives</h3>
+  <p>
+    Nothing upstream of the merge knows or cares which table a row belongs to — every row lands in the same
+    <code>CDC_LANDING</code> table as an opaque JSON payload. The single merge routine is what re-introduces
+    per-table structure: it reads Teradata's native JSON dot-path against the landed payload
+    (<code>payload."after".field</code>) and applies one <code>MERGE</code> per target table, filtered to that table's rows.
+    Functionally this is one execution touching 5 targets, not 5 separate jobs.
+  </p>
+
+  <h2>What to expect on the dashboard</h2>
+  <p>
+    The <strong>Scenario B</strong> card shows a job-count badge of <code>1/1 jobs running</code> and a single row in the
+    jobs table — <span class="job-name">demo_b_all</span> — with one set of start/kill/restart buttons. The per-table
+    row-delta breakdown still shows all 5 tables individually (the fan-out merge keeps that granularity downstream), even
+    though there's only one job and one landing table feeding it.
+  </p>
+
+  <div class="callout warn">
+    <p><strong>The tradeoff demo moment:</strong> click <em>kill</em> on <span class="job-name">demo_b_all</span> — and unlike
+    Scenario A, <strong>all 5 tables</strong> stop landing rows at once, because they share one process. This is the
+    honest cost of consolidation: you trade per-table failure isolation for a dramatically smaller operational footprint.
+    Restarting brings all 5 back together, too.</p>
+  </div>
+
+  <h2>Why this is the recommended pattern</h2>
+  <p>
+    This is  the <strong>Tier 1 / best-practice</strong> production
+    design, scaled down to 5 tables for the room to watch. At real scale, the same shape handles 10–30 Debezium connectors
+    grouped by domain, consolidated into 1–3 Kafka topics, feeding 1 TPT job, feeding 1 landing table, feeding one fan-out
+    merge that writes to however many target tables exist — 5 or 500, the job count doesn't change.
+    See <a href="/static/pages/scaling.html">Scaling to 500</a> for the throughput numbers and independently corroborated
+    real-world benchmarks at this scale.
+  </p>
+
+  <div class="pagenav">
+    <a href="/static/pages/scenario-a.html">&larr; Scenario A</a>
+    <a href="/static/pages/scenario-c.html">Next: Scenario C &rarr;</a>
+  </div>
+</div>
+</body>
+</html>

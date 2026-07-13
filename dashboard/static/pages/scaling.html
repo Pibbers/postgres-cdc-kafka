@@ -1,0 +1,153 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Scaling to 500 Topics — Kafka CDC → TPT → Teradata Demo</title>
+<link rel="stylesheet" href="/static/pages/common.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand"><div class="brand-dot"></div><span class="brand-name">Teradata</span></div>
+  <a href="/">Dashboard</a>
+  <a href="/static/pages/overview.html">Overview</a>
+  <a href="/static/pages/scenario-a.html">Scenario A</a>
+  <a href="/static/pages/scenario-b.html">Scenario B</a>
+  <a href="/static/pages/scenario-c.html">Scenario C</a>
+  <a href="/static/pages/scaling.html" class="active">Scaling to 500</a>
+  <span class="spacer"></span>
+  <a href="/" class="live-link">&#9679; Live dashboard</a>
+</nav>
+<div class="page">
+
+  <div class="eyebrow">Production architecture</div>
+  <h1>From 5 tables to 500</h1>
+  <p class="subtitle">The numbers behind "500 independent jobs doesn't work" — and what to build instead.</p>
+
+  <h2>The binding constraint: Teradata session ceilings</h2>
+  <p>
+    Every TPT job holds open a set of Teradata sessions for its whole lifetime. The limit on how many jobs can run
+    concurrently isn't about Kafka, CPU, or network — it's about how many sessions the target system can host at once.
+  </p>
+  <div class="callout warn">
+    <p><strong>A number worth being precise about:</strong> Teradata's <em>maximum nodes per system configuration</em> is
+    1,024 — a completely different thing from a session limit, and unrelated to job concurrency. Earlier internal material
+    on this topic conflated the two and quoted "1,024 global sessions" as the ceiling; that was traced back to Appendix B
+    of the <em>Database Administration</em> manual (R20.00) and corrected. The real session ceilings are below.</p>
+  </div>
+  <table>
+    <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Max sessions per PE</td><td><strong>120</strong></td></tr>
+      <tr><td>Max sessions per gateway vproc</td><td><strong>1,200</strong> certified maximum, <strong>600</strong> default, tunable</td></tr>
+    </tbody>
+  </table>
+  <p>
+    There is no single global session number — total system-wide session capacity is a function of
+    <strong>node count &times; per-gateway limit</strong> (one gateway vproc per node by default), not a fixed constant.
+  </p>
+
+  <h2>What that means for "500 independent jobs"</h2>
+  <p>
+    500 independent TPT jobs at roughly 4 sessions each need about <strong>2,000 sessions</strong>. Whether that fits
+    depends on the specific system's gateway/PE topology — but across realistic system sizes, only a fraction of 500 jobs
+    can actually run at once. The rest queue.
+  </p>
+  <table>
+    <thead><tr><th>System</th><th>AMP count</th><th>Max concurrent jobs</th><th>Queue depth</th></tr></thead>
+    <tbody>
+      <tr><td>POC</td><td>4</td><td>192</td><td>308</td></tr>
+      <tr><td>Small Prod</td><td>8</td><td>96</td><td>404</td></tr>
+      <tr><td>Medium Prod</td><td>20</td><td>38</td><td>462</td></tr>
+      <tr><td>Large Prod</td><td>120</td><td>8</td><td>492</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Counter-intuitively, <strong>larger systems run fewer concurrent independent jobs</strong>, not more — a 20-AMP
+    production system runs 38 jobs concurrently while 462 queue, with average queue waits ranging from <strong>10 minutes
+    to 31 hours</strong>. That's not real-time ingestion; it's serialized batch wearing a streaming costume. This is the
+    concrete failure mode Scenario A is standing in for at 5-table scale.
+  </p>
+
+  <h2>The three production patterns</h2>
+  <p>Each demo scenario is a small, runnable version of one of these three patterns:</p>
+  <table>
+    <thead><tr><th>Pattern</th><th>Demo stand-in</th><th>Jobs at 500 tables</th><th>Complexity</th><th>Throughput</th><th>Latency</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>CDC + 1 TPT job</strong><br>consolidate everything</td>
+        <td><span class="tag tag-b">B</span></td>
+        <td>1</td>
+        <td>LOW</td>
+        <td>8,000&ndash;40,000 rows/sec</td>
+        <td>100&ndash;500ms</td>
+      </tr>
+      <tr>
+        <td><strong>Domain segmentation</strong><br>independent topics, grouped by business domain</td>
+        <td><em>&mdash; not run in this demo (see below)</em></td>
+        <td>3&ndash;5</td>
+        <td>MEDIUM</td>
+        <td>40,000&ndash;80,000 rows/sec</td>
+        <td>200ms&ndash;5s</td>
+      </tr>
+      <tr>
+        <td><strong>Tiered</strong><br>hot tables isolated, warm/cold consolidated</td>
+        <td><span class="tag tag-c">C</span></td>
+        <td>~22 (20 hot + ~2 consolidated)</td>
+        <td>MEDIUM&ndash;HIGH</td>
+        <td>20,000&ndash;50,000 rows/sec</td>
+        <td>tiered: hot low, cold high</td>
+      </tr>
+      <tr>
+        <td><strong>500 independent jobs</strong><br>the broken pattern</td>
+        <td><span class="tag tag-a">A</span></td>
+        <td>500 (only 8&ndash;192 run concurrently)</td>
+        <td>EXTREME</td>
+        <td>8,000&ndash;50,000 rows/sec, <em>queued</em></td>
+        <td>10 min&ndash;31 hrs</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="subtitle" style="margin-top:-4px">
+    "Domain segmentation" applies when the 500 sources are genuinely independent Kafka topics (microservices publishing
+    directly), rather than CDC off database tables — not this demo's situation, but worth naming since a customer may ask
+    about it. This demo's source is a single database, so CDC-based consolidation (Scenario B) and tiering (Scenario C)
+    are the two patterns that actually apply.
+  </p>
+
+  <h2>Mapping the demo onto 500 tables</h2>
+  <div class="card">
+    <p><span class="tag tag-a">A</span> &mdash; extrapolates to 500 independent jobs. Not viable on any but the smallest
+    systems; included so the room feels why "one job per table" is the natural first instinct before the numbers above
+    undercut it.</p>
+  </div>
+  <div class="card">
+    <p><span class="tag tag-b">B</span> &mdash; extrapolates to the Tier 1 / best-practice production design: 10&ndash;30
+    Debezium connectors grouped by domain, consolidated into 1&ndash;3 Kafka topics, 1 TPT job, 1 landing table, one
+    fan-out merge. Independently corroborated at real scale: a logistics customer processing 500M messages/day across 17
+    sources at 6,200 rows/sec with 0.2% additional CPU; a global automotive manufacturer at 8,000 msg/sec (500M msg/day)
+    via MQ; a telco reference handling 1 billion messages/hour.</p>
+  </div>
+  <div class="card">
+    <p><span class="tag tag-c">C</span> &mdash; extrapolates to the tiered pattern: the 10&ndash;20 tables that would
+    actually cause business impact if delayed a few seconds (fraud/risk signals, real-time authorization, inventory
+    reservations — identified by asking "which 10&ndash;20 would hurt if they lagged 5 seconds?") get dedicated per-table
+    jobs. The remaining ~480 warm/cold tables share one or a handful of consolidated jobs, each on the appropriate TASM
+    tier. Net: roughly <strong>22 concurrent jobs instead of 500</strong>, comfortably inside any system's session
+    ceiling, while still giving genuine real-time isolation where it's actually needed.</p>
+  </div>
+
+  <h2>The one-sentence close</h2>
+  <div class="callout">
+    <p>Everything you just watched on the dashboard — job counts, landing latency, the isolation-vs-consolidation
+    tradeoff on kill/restart — is the same mechanism that would run at 500 tables. The only thing that changes between 5
+    and 500 is which of these three patterns makes sense for your specific tables' latency requirements, not the
+    underlying architecture.</p>
+  </div>
+
+  <div class="pagenav">
+    <a href="/static/pages/scenario-c.html">&larr; Scenario C</a>
+    <a href="/static/pages/overview.html">Back to Overview</a>
+  </div>
+</div>
+</body>
+</html>

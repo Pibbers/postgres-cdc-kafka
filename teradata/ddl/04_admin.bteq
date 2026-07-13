@@ -1,0 +1,33 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+.SET ERRORLEVEL 3803 SEVERITY 0   /* "table already exists" - tolerate re-running this script */
+
+DATABASE DEMO_ADMIN;
+
+CREATE MULTISET TABLE DEMO_ADMIN.CDC_BATCH_CONTROL
+(
+    scenario_name    VARCHAR(10),
+    batch_id         BIGINT,
+    source_table     VARCHAR(64),
+    batch_start_ts   TIMESTAMP(6),
+    batch_end_ts     TIMESTAMP(6),
+    row_count        BIGINT,
+    insert_count     BIGINT,
+    update_count     BIGINT,
+    delete_count     BIGINT,
+    status_cd        VARCHAR(20)
+)
+PRIMARY INDEX (scenario_name, batch_id);
+
+CREATE MULTISET TABLE DEMO_ADMIN.APPLIED_EVENT_LOG
+(
+    scenario_name     VARCHAR(10),
+    source_table      VARCHAR(64),
+    primary_key_val   VARCHAR(128),
+    source_ts_ms      BIGINT,
+    applied_ts        TIMESTAMP(6)
+)
+PRIMARY INDEX (scenario_name, source_table, primary_key_val);
+
+.LOGOFF;
+.QUIT;

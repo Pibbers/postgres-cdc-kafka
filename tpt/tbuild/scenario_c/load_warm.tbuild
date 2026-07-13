@@ -1,0 +1,114 @@
+/*=============================================================
+  Scenario C tier 2 (warm/cold): one consolidated job for customer/account/card/
+  payment, sharing one landing table (WARM_LANDING) - exactly Scenario B's proven
+  multi-topic UNION ALL mechanism, scoped to the 4 non-hot tables. The hot
+  transaction table gets its own dedicated job instead (load_transaction.tbuild).
+  This tiering - a handful of dedicated jobs for hot tables, one consolidated job
+  for everything else - is the actual production pattern the spec's Section 11
+  scaling narrative recommends at 500-table scale (~22 jobs instead of 500);
+  Scenario C demonstrates it at 5-table scale using only proven TPT mechanisms.
+
+  Variables (substituted by run_tbuild.ps1 / run_tbuild.sh from the environment):
+    TD_HOST  TD_USER  TD_PASSWORD  TD_DATABASE
+    KAFKA_BOOTSTRAP  KAFKA_GROUP_ID  KAFKA_IDLE_TIMEOUT
+
+  Run with: tbuild -f <this, pre-substituted> -j demo_c_warm -l 5 -z 10
+=============================================================*/
+
+DEFINE JOB DEMO_C_LOAD_WARM
+DESCRIPTION 'Scenario C tier 2 (warm/cold): 4 topics -> 1 TPT job -> 1 landing table -> fan-out merge'
+(
+  DEFINE SCHEMA CDC_RAW_SCHEMA
+  (
+    PAYLOAD VARCHAR(16000)
+  );
+
+  DEFINE OPERATOR KAFKA_CUSTOMER
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_customer',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.customer -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_ACCOUNT
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_account',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.account -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_CARD
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_card',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.card -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_PAYMENT
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_payment',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = '|~|',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T cdc.public.payment -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR TD_INSERTER
+  TYPE STREAM
+  SCHEMA CDC_RAW_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).WARM_LANDING',
+    VARCHAR LogTable      = '$(TD_DATABASE).WARM_LANDING_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).WARM_LANDING_ET'
+  );
+
+  STEP MAIN_STEP
+  (
+    APPLY
+    (
+      'INSERT INTO $(TD_DATABASE).WARM_LANDING (PAYLOAD) VALUES (:PAYLOAD);'
+    )
+    TO OPERATOR (TD_INSERTER)
+    SELECT * FROM OPERATOR (KAFKA_CUSTOMER)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_ACCOUNT)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_CARD)
+    UNION ALL
+    SELECT * FROM OPERATOR (KAFKA_PAYMENT);
+  );
+);

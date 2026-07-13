@@ -1,0 +1,189 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+DATABASE DEMO_C;
+
+/* Snapshot a consistent cutoff so the final UPDATE marks exactly the rows this
+   run actually processed, even if new rows land mid-script. */
+CREATE VOLATILE TABLE VT_BATCH_CUTOFF AS
+(
+    SELECT CURRENT_TIMESTAMP(6) AS CUTOFF_TS
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE VT_CUSTOMER_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".customer_id AS BIGINT), CAST(PAYLOAD."before".customer_id AS BIGINT)) AS customer_id,
+        CAST(PAYLOAD."after".first_name AS VARCHAR(100)) AS first_name,
+        CAST(PAYLOAD."after".last_name AS VARCHAR(100)) AS last_name,
+        CAST(PAYLOAD."after".email AS VARCHAR(200)) AS email,
+        CAST(PAYLOAD."after".phone AS VARCHAR(30)) AS phone,
+        CAST(PAYLOAD."after".address AS VARCHAR(300)) AS address,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".updated_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS source_updated_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_C.WARM_LANDING
+    WHERE PROCESSED_IND = 0
+      AND INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+      AND CAST(PAYLOAD.source."table" AS VARCHAR(64)) = 'customer'
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".customer_id AS BIGINT), CAST(PAYLOAD."before".customer_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_C.CUSTOMER AS T
+USING VT_CUSTOMER_LATEST AS S
+ON T.customer_id = S.customer_id
+WHEN MATCHED THEN UPDATE SET
+    first_name = CASE WHEN S.operation_code = 'd' THEN T.first_name ELSE S.first_name END,
+    last_name = CASE WHEN S.operation_code = 'd' THEN T.last_name ELSE S.last_name END,
+    email = CASE WHEN S.operation_code = 'd' THEN T.email ELSE S.email END,
+    phone = CASE WHEN S.operation_code = 'd' THEN T.phone ELSE S.phone END,
+    address = CASE WHEN S.operation_code = 'd' THEN T.address ELSE S.address END,
+    source_updated_ts = CASE WHEN S.operation_code = 'd' THEN T.source_updated_ts ELSE S.source_updated_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (customer_id, first_name, last_name, email, phone, address, source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.customer_id, S.first_name, S.last_name, S.email, S.phone, S.address, S.source_updated_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_CUSTOMER_LATEST;
+
+CREATE VOLATILE TABLE VT_ACCOUNT_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".account_id AS BIGINT), CAST(PAYLOAD."before".account_id AS BIGINT)) AS account_id,
+        CAST(PAYLOAD."after".customer_id AS BIGINT) AS customer_id,
+        CAST(PAYLOAD."after".account_type AS VARCHAR(20)) AS account_type,
+        CAST(PAYLOAD."after".status AS VARCHAR(20)) AS status,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".updated_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS source_updated_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_C.WARM_LANDING
+    WHERE PROCESSED_IND = 0
+      AND INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+      AND CAST(PAYLOAD.source."table" AS VARCHAR(64)) = 'account'
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".account_id AS BIGINT), CAST(PAYLOAD."before".account_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_C."ACCOUNT" AS T
+USING VT_ACCOUNT_LATEST AS S
+ON T.account_id = S.account_id
+WHEN MATCHED THEN UPDATE SET
+    customer_id = CASE WHEN S.operation_code = 'd' THEN T.customer_id ELSE S.customer_id END,
+    account_type = CASE WHEN S.operation_code = 'd' THEN T.account_type ELSE S.account_type END,
+    status = CASE WHEN S.operation_code = 'd' THEN T.status ELSE S.status END,
+    source_updated_ts = CASE WHEN S.operation_code = 'd' THEN T.source_updated_ts ELSE S.source_updated_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (account_id, customer_id, account_type, status, source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.account_id, S.customer_id, S.account_type, S.status, S.source_updated_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_ACCOUNT_LATEST;
+
+CREATE VOLATILE TABLE VT_CARD_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".card_id AS BIGINT), CAST(PAYLOAD."before".card_id AS BIGINT)) AS card_id,
+        CAST(PAYLOAD."after".account_id AS BIGINT) AS account_id,
+        CAST(PAYLOAD."after".card_number_masked AS VARCHAR(20)) AS card_number_masked,
+        CAST(PAYLOAD."after".card_type AS VARCHAR(20)) AS card_type,
+        CAST(PAYLOAD."after".status AS VARCHAR(20)) AS status,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".updated_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS source_updated_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_C.WARM_LANDING
+    WHERE PROCESSED_IND = 0
+      AND INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+      AND CAST(PAYLOAD.source."table" AS VARCHAR(64)) = 'card'
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".card_id AS BIGINT), CAST(PAYLOAD."before".card_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_C.CARD AS T
+USING VT_CARD_LATEST AS S
+ON T.card_id = S.card_id
+WHEN MATCHED THEN UPDATE SET
+    account_id = CASE WHEN S.operation_code = 'd' THEN T.account_id ELSE S.account_id END,
+    card_number_masked = CASE WHEN S.operation_code = 'd' THEN T.card_number_masked ELSE S.card_number_masked END,
+    card_type = CASE WHEN S.operation_code = 'd' THEN T.card_type ELSE S.card_type END,
+    status = CASE WHEN S.operation_code = 'd' THEN T.status ELSE S.status END,
+    source_updated_ts = CASE WHEN S.operation_code = 'd' THEN T.source_updated_ts ELSE S.source_updated_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (card_id, account_id, card_number_masked, card_type, status, source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.card_id, S.account_id, S.card_number_masked, S.card_type, S.status, S.source_updated_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_CARD_LATEST;
+
+CREATE VOLATILE TABLE VT_PAYMENT_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".payment_id AS BIGINT), CAST(PAYLOAD."before".payment_id AS BIGINT)) AS payment_id,
+        CAST(PAYLOAD."after".account_id AS BIGINT) AS account_id,
+        CAST(PAYLOAD."after".amount AS DECIMAL(12,2)) AS amount,
+        CAST(PAYLOAD."after".currency AS CHAR(3)) AS currency,
+        CAST(PAYLOAD."after".payment_method AS VARCHAR(20)) AS payment_method,
+        CAST(PAYLOAD."after".status AS VARCHAR(20)) AS status,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".payment_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".payment_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".payment_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".payment_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS payment_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_C.WARM_LANDING
+    WHERE PROCESSED_IND = 0
+      AND INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+      AND CAST(PAYLOAD.source."table" AS VARCHAR(64)) = 'payment'
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".payment_id AS BIGINT), CAST(PAYLOAD."before".payment_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_C.PAYMENT AS T
+USING VT_PAYMENT_LATEST AS S
+ON T.payment_id = S.payment_id
+WHEN MATCHED THEN UPDATE SET
+    account_id = CASE WHEN S.operation_code = 'd' THEN T.account_id ELSE S.account_id END,
+    amount = CASE WHEN S.operation_code = 'd' THEN T.amount ELSE S.amount END,
+    currency = CASE WHEN S.operation_code = 'd' THEN T.currency ELSE S.currency END,
+    payment_method = CASE WHEN S.operation_code = 'd' THEN T.payment_method ELSE S.payment_method END,
+    status = CASE WHEN S.operation_code = 'd' THEN T.status ELSE S.status END,
+    payment_ts = CASE WHEN S.operation_code = 'd' THEN T.payment_ts ELSE S.payment_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (payment_id, account_id, amount, currency, payment_method, status, payment_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.payment_id, S.account_id, S.amount, S.currency, S.payment_method, S.status, S.payment_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_PAYMENT_LATEST;
+
+DELETE FROM DEMO_C.WARM_LANDING
+WHERE PROCESSED_IND = 0
+  AND INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF);
+
+DROP TABLE VT_BATCH_CUTOFF;
+
+.LOGOFF;
+.QUIT;

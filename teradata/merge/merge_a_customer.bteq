@@ -1,0 +1,60 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+DATABASE DEMO_A;
+
+/* Snapshot a consistent cutoff so the final DELETE removes exactly the rows
+   this run actually processed, even if new rows land mid-script. */
+CREATE VOLATILE TABLE VT_BATCH_CUTOFF AS
+(
+    SELECT CURRENT_TIMESTAMP(6) AS CUTOFF_TS
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE VT_CUSTOMER_LATEST AS
+(
+    SELECT
+        COALESCE(CAST(PAYLOAD."after".customer_id AS BIGINT), CAST(PAYLOAD."before".customer_id AS BIGINT)) AS customer_id,
+        CAST(PAYLOAD."after".first_name AS VARCHAR(100)) AS first_name,
+        CAST(PAYLOAD."after".last_name AS VARCHAR(100)) AS last_name,
+        CAST(PAYLOAD."after".email AS VARCHAR(200)) AS email,
+        CAST(PAYLOAD."after".phone AS VARCHAR(30)) AS phone,
+        CAST(PAYLOAD."after".address AS VARCHAR(300)) AS address,
+        CAST(DATE '1970-01-01' + (CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000/86400) AS TIMESTAMP(6))
+            + (((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 86400) / 3600) * INTERVAL '1' HOUR
+            + ((CAST(PAYLOAD."after".updated_ts AS BIGINT)/1000000) MOD 3600) * INTERVAL '1' SECOND
+            + (CAST(PAYLOAD."after".updated_ts AS BIGINT) MOD 1000000) * INTERVAL '0.000001' SECOND AS source_updated_ts,
+        CAST(PAYLOAD.op AS CHAR(1)) AS operation_code,
+        CAST(PAYLOAD.source.ts_ms AS BIGINT) AS source_ts_ms
+    FROM DEMO_A.CUSTOMER_LANDING
+    WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF)
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(CAST(PAYLOAD."after".customer_id AS BIGINT), CAST(PAYLOAD."before".customer_id AS BIGINT))
+        ORDER BY CAST(PAYLOAD.source.ts_ms AS BIGINT) DESC
+    ) = 1
+) WITH DATA ON COMMIT PRESERVE ROWS;
+
+MERGE INTO DEMO_A.CUSTOMER AS T
+USING VT_CUSTOMER_LATEST AS S
+ON T.customer_id = S.customer_id
+WHEN MATCHED THEN UPDATE SET
+    first_name = CASE WHEN S.operation_code = 'd' THEN T.first_name ELSE S.first_name END,
+    last_name = CASE WHEN S.operation_code = 'd' THEN T.last_name ELSE S.last_name END,
+    email = CASE WHEN S.operation_code = 'd' THEN T.email ELSE S.email END,
+    phone = CASE WHEN S.operation_code = 'd' THEN T.phone ELSE S.phone END,
+    address = CASE WHEN S.operation_code = 'd' THEN T.address ELSE S.address END,
+    source_updated_ts = CASE WHEN S.operation_code = 'd' THEN T.source_updated_ts ELSE S.source_updated_ts END,
+    td_update_ts = CURRENT_TIMESTAMP(6),
+    cdc_operation_cd = S.operation_code,
+    cdc_deleted_ind = CASE WHEN S.operation_code = 'd' THEN 1 ELSE 0 END
+WHEN NOT MATCHED THEN INSERT
+    (customer_id, first_name, last_name, email, phone, address, source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+    VALUES (S.customer_id, S.first_name, S.last_name, S.email, S.phone, S.address, S.source_updated_ts, CURRENT_TIMESTAMP(6), S.operation_code, 0);
+
+DROP TABLE VT_CUSTOMER_LATEST;
+
+DELETE FROM DEMO_A.CUSTOMER_LANDING
+WHERE INGEST_TS <= (SELECT CUTOFF_TS FROM VT_BATCH_CUTOFF);
+
+DROP TABLE VT_BATCH_CUTOFF;
+
+.LOGOFF;
+.QUIT;

@@ -1,0 +1,271 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Kafka CDC → TPT → Teradata Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap">
+<style>
+  :root {
+    --navy:   #00233C;
+    --orange: #FF5F02;
+    --blue:   #3053F4;
+    --green:  #04CE7E;
+    --lavender: #C4B7F1;
+    --gray-border: #CCD3D8;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: 'Inter', -apple-system, Segoe UI, Arial, sans-serif; background: var(--navy); color: rgba(255,255,255,0.88); margin: 0; padding: 0; font-size: 14px; }
+  .main { padding: 24px 28px 48px; }
+  h1 { font-size: 20px; font-weight: 300; margin: 0 0 20px; color: #fff; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 18px 20px; flex: 1; min-width: 280px; }
+  .card h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 8px; }
+  .card h2 .tag { font-size: 10px; padding: 2px 8px; border-radius: 20px; font-weight: 600; letter-spacing: 0.06em; }
+  .tag-running { background: rgba(4,206,126,0.15); color: var(--green); border: 1px solid rgba(4,206,126,0.30); }
+  .tag-partial { background: rgba(255,95,2,0.15); color: #ffaa66; border: 1px solid rgba(255,95,2,0.30); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.07); }
+  th { color: rgba(255,255,255,0.40); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom-color: rgba(255,255,255,0.12); }
+  td { color: rgba(255,255,255,0.72); }
+  tr:last-child td { border-bottom: none; }
+  .status-running { color: var(--green); font-weight: 600; }
+  .status-stopped { color: #ff6b6b; }
+  .status-not_started { color: rgba(255,255,255,0.35); }
+  button { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.75); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 3px 9px; font-size: 11.5px; font-family: inherit; cursor: pointer; transition: background 0.15s; }
+  button:hover { background: rgba(255,255,255,0.12); color: #fff; }
+  #controls { margin-bottom: 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #controls button { padding: 9px 18px; font-size: 13px; font-weight: 600; background: var(--orange); color: #fff; border-color: transparent; border-radius: 12px; }
+  #controls button:hover { background: #e55500; }
+  #controls button.stop-all { background: #d33; }
+  #controls button.stop-all:hover { background: #b82929; }
+  #controls button.merge-toggle { background: var(--blue); }
+  #controls button.merge-toggle:hover { background: #2440c9; }
+  #controls button.merge-toggle.fast { background: var(--green); }
+  #controls button.merge-toggle.fast:hover { background: #03a866; }
+  #burst-status, #bulk-status { font-size: 12px; color: rgba(255,255,255,0.50); }
+  .metric-big { font-size: 28px; font-weight: 300; color: #fff; margin: 4px 0 2px; }
+  .metric-label { font-size: 11px; color: rgba(255,255,255,0.40); margin-bottom: 10px; }
+  canvas { max-height: 220px; }
+  nav.topnav {
+    display: flex; gap: 2px; flex-wrap: wrap; align-items: stretch;
+    padding: 0 28px; background: var(--navy);
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    min-height: 48px;
+  }
+  nav.topnav .brand {
+    display: flex; align-items: center;
+    margin-right: 16px; padding-right: 16px;
+    border-right: 1px solid rgba(255,255,255,0.12);
+  }
+  nav.topnav .brand-dot { width: 10px; height: 10px; background: var(--orange); border-radius: 50%; margin-right: 8px; }
+  nav.topnav .brand-name { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.50); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+  nav.topnav a { color: rgba(255,255,255,0.55); text-decoration: none; font-size: 13px; padding: 0 12px; display: flex; align-items: center; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
+  nav.topnav a:hover { color: rgba(255,255,255,0.90); border-bottom-color: rgba(255,255,255,0.25); }
+  nav.topnav a.active { color: #fff; font-weight: 600; border-bottom-color: var(--orange); }
+  .chart-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 18px 20px; margin-top: 16px; }
+  .chart-card h2 { margin: 0 0 14px; font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.70); }
+</style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand"><div class="brand-dot"></div><span class="brand-name">Teradata</span></div>
+    <a href="/" class="active">Dashboard</a>
+    <a href="/static/pages/overview.html">Overview</a>
+    <a href="/static/pages/scenario-a.html">Scenario A</a>
+    <a href="/static/pages/scenario-b.html">Scenario B</a>
+    <a href="/static/pages/scenario-c.html">Scenario C</a>
+    <a href="/static/pages/scaling.html">Scaling to 500</a>
+  </nav>
+  <div class="main">
+  <h1>Kafka CDC &rarr; TPT &rarr; Teradata &mdash; Scenario A vs B vs C</h1>
+  <div id="controls">
+    <button onclick="startAll()">Start everything</button>
+    <button class="stop-all" onclick="stopAll()">Stop everything</button>
+    <button id="merge-toggle-btn" class="merge-toggle" onclick="toggleMergeSpeed()">Merge: normal (3s)</button>
+    <button onclick="burst()">Burst transaction load</button>
+    <span id="bulk-status"></span>
+    <span id="burst-status"></span>
+  </div>
+  <div class="row" id="cards"></div>
+  <div class="chart-card">
+    <h2>End-to-end latency &mdash; source commit to Teradata landing (seconds)</h2>
+    <canvas id="latencyChart"></canvas>
+  </div>
+  </div>
+
+<script>
+const SCENARIOS = ["A", "B", "C"];
+const latencyHistory = { A: [], B: [], C: [] };
+const prevCounts = {};
+const MAX_POINTS = 30;
+
+const ctx = document.getElementById('latencyChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: SCENARIOS.map((s, i) => ({
+      label: 'Scenario ' + s,
+      data: [],
+      borderColor: ['#04CE7E', '#C4B7F1', '#FF5F02'][i],
+      backgroundColor: ['rgba(4,206,126,0.08)', 'rgba(196,183,241,0.08)', 'rgba(255,95,2,0.08)'][i],
+      tension: 0.3,
+      pointRadius: 0,
+      borderWidth: 2,
+    })),
+  },
+  options: {
+    responsive: true,
+    scales: {
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: 'seconds', color: 'rgba(255,255,255,0.40)' },
+        grid: { color: 'rgba(255,255,255,0.06)' },
+        ticks: { color: 'rgba(255,255,255,0.45)' }
+      },
+      x: {
+        grid: { color: 'rgba(255,255,255,0.04)' },
+        ticks: { color: 'rgba(255,255,255,0.35)', maxTicksLimit: 8 }
+      }
+    },
+    plugins: {
+      legend: { labels: { color: 'rgba(255,255,255,0.70)', boxWidth: 12, padding: 16 } }
+    },
+  },
+});
+
+function fmtTables(scenario, tables) {
+  let rows = '';
+  for (const [name, m] of Object.entries(tables || {})) {
+    const key = scenario + ':' + name;
+    const prev = prevCounts[key];
+    const cur = m.row_count;
+    const delta = (prev !== undefined && cur !== undefined) ? Math.max(0, cur - prev) : 0;
+    prevCounts[key] = cur;
+    rows += `<tr>
+      <td>${name}</td>
+      <td>${cur ?? '-'}</td>
+      <td>${delta > 0 ? '+' + delta : ''}</td>
+      <td>${m.latency_seconds !== null && m.latency_seconds !== undefined ? m.latency_seconds.toFixed(1) + 's' : '-'}</td>
+    </tr>`;
+  }
+  return rows;
+}
+
+function fmtJobs(scenario, jobs) {
+  let rows = '';
+  for (const [name, j] of Object.entries(jobs || {})) {
+    rows += `<tr>
+      <td>${name}</td>
+      <td class="status-${j.status}">${j.status}</td>
+      <td>
+        <button onclick="jobAction('${name}','start')">start</button>
+        <button onclick="jobAction('${name}','kill')">kill</button>
+        <button onclick="jobAction('${name}','restart')">restart</button>
+      </td>
+    </tr>`;
+  }
+  return rows;
+}
+
+async function jobAction(name, action) {
+  await fetch(`/api/job/${name}/${action}`, { method: 'POST' });
+  refresh();
+}
+
+let mergeIsFast = false;
+
+async function startAll() {
+  document.getElementById('bulk-status').innerText = 'starting everything...';
+  await fetch('/api/start_all', { method: 'POST' });
+  document.getElementById('bulk-status').innerText = 'started';
+  setTimeout(() => { document.getElementById('bulk-status').innerText = ''; }, 4000);
+  refresh();
+}
+
+async function stopAll() {
+  document.getElementById('bulk-status').innerText = 'stopping everything...';
+  await fetch('/api/stop_all', { method: 'POST' });
+  document.getElementById('bulk-status').innerText = 'stopped';
+  setTimeout(() => { document.getElementById('bulk-status').innerText = ''; }, 4000);
+  refresh();
+}
+
+async function toggleMergeSpeed() {
+  const seconds = mergeIsFast ? 3 : 1;
+  await fetch(`/api/merge/interval/${seconds}`, { method: 'POST' });
+  refresh();
+}
+
+async function burst() {
+  document.getElementById('burst-status').innerText = 'triggering...';
+  const r = await fetch('/api/burst', { method: 'POST' });
+  const j = await r.json();
+  document.getElementById('burst-status').innerText = j.status || JSON.stringify(j);
+  setTimeout(() => { document.getElementById('burst-status').innerText = ''; }, 5000);
+}
+
+async function refresh() {
+  const r = await fetch('/api/metrics');
+  const data = await r.json();
+  const scenarios = data.scenarios || {};
+  const mergeLoop = data.merge_loop || {};
+
+  const mergeBtn = document.getElementById('merge-toggle-btn');
+  mergeIsFast = mergeLoop.interval <= 1;
+  mergeBtn.classList.toggle('fast', mergeIsFast);
+  const mergeState = mergeLoop.status === 'running' ? '' : ' (stopped)';
+  mergeBtn.innerText = mergeIsFast
+    ? `Merge: fast (1s)${mergeState} – click for normal`
+    : `Merge: normal (${mergeLoop.interval ?? 3}s)${mergeState} – click for fast`;
+
+  let html = '';
+  const label = new Date().toLocaleTimeString();
+  let labelsUpdated = false;
+
+  for (const s of SCENARIOS) {
+    const sc = scenarios[s] || {};
+    const tables = sc.tables || {};
+    const jobs = sc.jobs || {};
+    const jobCount = Object.keys(jobs).length;
+    const runningCount = Object.values(jobs).filter(j => j.status === 'running').length;
+    const totalRows = Object.values(tables).reduce((acc, t) => acc + (t.row_count || 0), 0);
+    const avgLatency = Object.values(tables).map(t => t.latency_seconds).filter(x => x !== null && x !== undefined);
+    const latVal = avgLatency.length ? avgLatency.reduce((a, b) => a + b, 0) / avgLatency.length : null;
+
+    if (latVal !== null) {
+      latencyHistory[s].push(latVal);
+      if (latencyHistory[s].length > MAX_POINTS) latencyHistory[s].shift();
+    }
+
+    html += `<div class="card">
+      <h2>Scenario ${s} <span class="tag">${runningCount}/${jobCount} jobs running</span></h2>
+      <div class="metric-big">${totalRows}</div>
+      <div class="metric-label">total rows in target tables</div>
+      <table><thead><tr><th>table</th><th>rows</th><th>Δ</th><th>latency</th></tr></thead>
+      <tbody>${fmtTables(s, tables)}</tbody></table>
+      <table style="margin-top:8px;"><thead><tr><th>job</th><th>status</th><th>controls</th></tr></thead>
+      <tbody>${fmtJobs(s, jobs)}</tbody></table>
+    </div>`;
+  }
+  document.getElementById('cards').innerHTML = html;
+
+  chart.data.labels.push(label);
+  if (chart.data.labels.length > MAX_POINTS) chart.data.labels.shift();
+  SCENARIOS.forEach((s, i) => {
+    chart.data.datasets[i].data = latencyHistory[s].slice();
+    // pad to align with labels length
+    while (chart.data.datasets[i].data.length < chart.data.labels.length) {
+      chart.data.datasets[i].data.unshift(null);
+    }
+  });
+  chart.update();
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

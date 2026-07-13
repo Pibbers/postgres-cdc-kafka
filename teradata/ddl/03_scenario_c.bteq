@@ -1,0 +1,114 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+.SET ERRORLEVEL 3803 SEVERITY 0   /* "table already exists" - tolerate re-running this script */
+
+DATABASE DEMO_C;
+
+/* Same shape as DEMO_A - Scenario C's difference from A is job orchestration (Section 8.3),
+   not table design: still 5 landing tables + 5 target tables, no shared landing. */
+
+CREATE MULTISET TABLE DEMO_C.CUSTOMER_LANDING
+(
+    PAYLOAD    JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS  TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+) NO PRIMARY INDEX;
+
+CREATE MULTISET TABLE DEMO_C.ACCOUNT_LANDING
+(
+    PAYLOAD    JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS  TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+) NO PRIMARY INDEX;
+
+CREATE MULTISET TABLE DEMO_C.CARD_LANDING
+(
+    PAYLOAD    JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS  TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+) NO PRIMARY INDEX;
+
+CREATE MULTISET TABLE DEMO_C.PAYMENT_LANDING
+(
+    PAYLOAD    JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS  TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+) NO PRIMARY INDEX;
+
+CREATE MULTISET TABLE DEMO_C.TRANSACTION_LANDING
+(
+    PAYLOAD    JSON(16776192) INLINE LENGTH 4096 CHARACTER SET LATIN NOT NULL,
+    INGEST_TS  TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+) NO PRIMARY INDEX;
+
+CREATE MULTISET TABLE DEMO_C.CUSTOMER
+(
+    customer_id        BIGINT NOT NULL,
+    first_name         VARCHAR(100),
+    last_name          VARCHAR(100),
+    email              VARCHAR(200),
+    phone              VARCHAR(30),
+    address            VARCHAR(300),
+    source_updated_ts  TIMESTAMP(6),
+    td_update_ts       TIMESTAMP(6),
+    cdc_operation_cd   CHAR(1),
+    cdc_deleted_ind    BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (customer_id);
+
+CREATE MULTISET TABLE DEMO_C."ACCOUNT"
+(
+    account_id         BIGINT NOT NULL,
+    customer_id        BIGINT,
+    account_type       VARCHAR(20),
+    status             VARCHAR(20),
+    source_updated_ts  TIMESTAMP(6),
+    td_update_ts       TIMESTAMP(6),
+    cdc_operation_cd   CHAR(1),
+    cdc_deleted_ind    BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (account_id);
+
+CREATE MULTISET TABLE DEMO_C.CARD
+(
+    card_id             BIGINT NOT NULL,
+    account_id          BIGINT,
+    card_number_masked  VARCHAR(20),
+    card_type           VARCHAR(20),
+    status              VARCHAR(20),
+    source_updated_ts   TIMESTAMP(6),
+    td_update_ts        TIMESTAMP(6),
+    cdc_operation_cd    CHAR(1),
+    cdc_deleted_ind     BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (card_id);
+
+CREATE MULTISET TABLE DEMO_C.PAYMENT
+(
+    payment_id       BIGINT NOT NULL,
+    account_id       BIGINT,
+    amount           DECIMAL(12,2),
+    currency         CHAR(3),
+    payment_method   VARCHAR(20),
+    status           VARCHAR(20),
+    payment_ts       TIMESTAMP(6),
+    td_update_ts     TIMESTAMP(6),
+    cdc_operation_cd CHAR(1),
+    cdc_deleted_ind  BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (payment_id);
+
+CREATE MULTISET TABLE DEMO_C."TRANSACTION"
+(
+    transaction_id    BIGINT NOT NULL,
+    account_id        BIGINT,
+    card_id           BIGINT,
+    amount            DECIMAL(12,2),
+    currency          CHAR(3),
+    merchant          VARCHAR(100),
+    status            VARCHAR(20),
+    transaction_ts    TIMESTAMP(6),
+    td_update_ts      TIMESTAMP(6),
+    cdc_operation_cd  CHAR(1),
+    cdc_deleted_ind   BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (transaction_id);
+
+.LOGOFF;
+.QUIT;
