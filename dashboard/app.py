@@ -26,6 +26,7 @@ TD_USER = os.getenv("TD_USER", "dbc")
 TD_PASSWORD = os.getenv("TD_PASSWORD", "dbc")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 LOAD_GEN_URL = os.getenv("LOAD_GEN_URL", "http://localhost:8090")
+CSV_LOAD_GEN_URL = os.getenv("CSV_LOAD_GEN_URL", "http://localhost:8092")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "3"))
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,6 +61,7 @@ JOBS = {
     "demo_b_all": dict(script="scenario_b/load_all.tbuild", db="DEMO_B", topic=None, group="tpt.demo_b", scenario="B", tables=["customer", "account", "card", "payment", "transaction"]),
     "demo_c_transaction": dict(script="scenario_c/load_transaction.tbuild", db="DEMO_C", topic="cdc.public.transaction", group="tpt.demo_c.transaction", scenario="C", tables=["transaction"]),
     "demo_c_warm": dict(script="scenario_c/load_warm.tbuild", db="DEMO_C", topic=None, group="tpt.demo_c.warm", scenario="C", tables=["customer", "account", "card", "payment"]),
+    "demo_d_all": dict(script="scenario_d/load_all.tbuild", db="DEMO_D", topic=None, group="tpt.demo_d", scenario="D", tables=["merchant", "branch", "fx_rate"]),
 }
 
 LANDING_TABLES = {
@@ -68,6 +70,9 @@ LANDING_TABLES = {
     ("A", "transaction"): "DEMO_A.TRANSACTION_LANDING",
     ("B", "*"): "DEMO_B.CDC_LANDING",
     ("C", "transaction"): "DEMO_C.TRANSACTION_LANDING", ("C", "warm"): "DEMO_C.WARM_LANDING",
+    # Scenario D deliberately has no landing-table entry - CSV rows upsert straight
+    # into the target tables via TPT APPLY DML, so there's no backlog to measure.
+    # See the D-specific latency block in poll_metrics() below.
 }
 
 TARGET_TABLES = {
@@ -77,6 +82,7 @@ TARGET_TABLES = {
     ("B", "payment"): "DEMO_B.PAYMENT", ("B", "transaction"): 'DEMO_B."TRANSACTION"',
     ("C", "customer"): "DEMO_C.CUSTOMER", ("C", "account"): 'DEMO_C."ACCOUNT"', ("C", "card"): "DEMO_C.CARD",
     ("C", "payment"): "DEMO_C.PAYMENT", ("C", "transaction"): 'DEMO_C."TRANSACTION"',
+    ("D", "merchant"): "DEMO_D.MERCHANT", ("D", "branch"): "DEMO_D.BRANCH", ("D", "fx_rate"): "DEMO_D.FX_RATE",
 }
 
 processes = {}  # job_name -> Popen, for jobs this dashboard process launched itself
@@ -294,7 +300,7 @@ def poll_metrics():
                 merge_external_pid = None
             con = teradatasql.connect(host=TD_HOST, user=TD_USER, password=TD_PASSWORD)
             cur = con.cursor()
-            scenarios = {"A": {"tables": {}}, "B": {"tables": {}}, "C": {"tables": {}}}
+            scenarios = {"A": {"tables": {}}, "B": {"tables": {}}, "C": {"tables": {}}, "D": {"tables": {}}}
 
             for (scenario, table), target in TARGET_TABLES.items():
                 try:
@@ -342,6 +348,24 @@ def poll_metrics():
                 else:
                     scenarios[scenario]["tables"].setdefault(table_key, {})["latency_seconds"] = lat
                     scenarios[scenario]["tables"].setdefault(table_key, {})["backlog"] = backlog
+
+            # Scenario D has no landing table (see LANDING_TABLES comment above), so
+            # latency is read straight off the target table's own bookkeeping columns
+            # instead of a landing-table join - td_update_ts minus source_updated_ts,
+            # on the most recently touched row. Backlog is always 0 by design.
+            for (scenario, table), target in TARGET_TABLES.items():
+                if scenario != "D":
+                    continue
+                try:
+                    rows = td_query(cur, f"""
+                        SELECT (td_update_ts - source_updated_ts) DAY(4) TO SECOND(6)
+                        FROM (SELECT TOP 1 td_update_ts, source_updated_ts FROM {target} ORDER BY td_update_ts DESC) t
+                    """)
+                    lat = parse_interval_seconds(rows[0][0]) if rows else None
+                except Exception:
+                    lat = None
+                scenarios["D"]["tables"].setdefault(table, {})["latency_seconds"] = lat
+                scenarios["D"]["tables"][table]["backlog"] = 0
 
             con.close()
 
@@ -396,13 +420,18 @@ def api_metrics():
 
 @app.post("/api/burst")
 def api_burst():
+    burst_events.append(time.time())
+    del burst_events[:-20]
+    result = {}
     try:
-        r = requests.post(f"{LOAD_GEN_URL}/burst", timeout=5)
-        burst_events.append(time.time())
-        del burst_events[:-20]
-        return r.json()
+        result["load_generator"] = requests.post(f"{LOAD_GEN_URL}/burst", timeout=5).json()
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        result["load_generator"] = {"error": str(e)}
+    try:
+        result["csv_load_generator"] = requests.post(f"{CSV_LOAD_GEN_URL}/burst", timeout=5).json()
+    except Exception as e:
+        result["csv_load_generator"] = {"error": str(e)}
+    return result
 
 
 @app.post("/api/job/{job_name}/start")

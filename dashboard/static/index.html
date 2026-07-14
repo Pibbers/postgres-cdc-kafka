@@ -76,10 +76,11 @@
     <a href="/static/pages/scenario-a.html">Scenario A</a>
     <a href="/static/pages/scenario-b.html">Scenario B</a>
     <a href="/static/pages/scenario-c.html">Scenario C</a>
+    <a href="/static/pages/scenario-d.html">Scenario D</a>
     <a href="/static/pages/scaling.html">Scaling to 500</a>
   </nav>
   <div class="main">
-  <h1>Kafka CDC &rarr; TPT &rarr; Teradata &mdash; Scenario A vs B vs C</h1>
+  <h1>Kafka CDC &rarr; TPT &rarr; Teradata &mdash; Scenario A vs B vs C vs D</h1>
   <div id="controls">
     <button onclick="startAll()">Start everything</button>
     <button class="stop-all" onclick="stopAll()">Stop everything</button>
@@ -96,8 +97,8 @@
   </div>
 
 <script>
-const SCENARIOS = ["A", "B", "C"];
-const latencyHistory = { A: [], B: [], C: [] };
+const SCENARIOS = ["A", "B", "C", "D"];
+const latencyHistory = { A: [], B: [], C: [], D: [] };
 const prevCounts = {};
 const MAX_POINTS = 30;
 const labelEpochs = [];   // wall-clock ms per chart label, parallel to chart.data.labels
@@ -146,8 +147,8 @@ const chart = new Chart(ctx, {
     datasets: SCENARIOS.map((s, i) => ({
       label: 'Scenario ' + s,
       data: [],
-      borderColor: ['#04CE7E', '#C4B7F1', '#FF5F02'][i],
-      backgroundColor: ['rgba(4,206,126,0.08)', 'rgba(196,183,241,0.08)', 'rgba(255,95,2,0.08)'][i],
+      borderColor: ['#04CE7E', '#C4B7F1', '#FF5F02', '#3053F4'][i],
+      backgroundColor: ['rgba(4,206,126,0.08)', 'rgba(196,183,241,0.08)', 'rgba(255,95,2,0.08)', 'rgba(48,83,244,0.08)'][i],
       tension: 0.3,
       pointRadius: 0,
       borderWidth: 2,

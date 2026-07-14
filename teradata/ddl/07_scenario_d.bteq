@@ -1,0 +1,57 @@
+.LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
+.SET ERROROUT STDOUT
+.SET ERRORLEVEL 3803 SEVERITY 0   /* "table already exists" - tolerate re-running this script */
+
+DATABASE DEMO_D;
+
+/* Scenario D: 3 CSV topics -> 1 TPT job -> 3 target tables, ZERO landing tables.
+   Unlike A/B/C, this source isn't Debezium/Postgres CDC - it's a standalone synthetic
+   CSV feed (merchant/branch/fx_rate), so there's no JSON envelope to land-and-shred.
+   Each CSV row already carries typed, flat columns plus an explicit op_code/event_ts,
+   so the TPT job upserts directly into these tables via APPLY DML - see
+   tpt/tbuild/scenario_d/load_all.tbuild. */
+
+CREATE MULTISET TABLE DEMO_D.MERCHANT
+(
+    merchant_id        BIGINT NOT NULL,
+    merchant_name      VARCHAR(100),
+    category           VARCHAR(30),
+    city               VARCHAR(50),
+    country            CHAR(2),
+    status             VARCHAR(20),
+    source_updated_ts  TIMESTAMP(6),
+    td_update_ts       TIMESTAMP(6),
+    cdc_operation_cd   CHAR(1),
+    cdc_deleted_ind    BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (merchant_id);
+
+CREATE MULTISET TABLE DEMO_D.BRANCH
+(
+    branch_id          BIGINT NOT NULL,
+    branch_name        VARCHAR(100),
+    city               VARCHAR(50),
+    region             VARCHAR(30),
+    status             VARCHAR(20),
+    source_updated_ts  TIMESTAMP(6),
+    td_update_ts       TIMESTAMP(6),
+    cdc_operation_cd   CHAR(1),
+    cdc_deleted_ind    BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (branch_id);
+
+CREATE MULTISET TABLE DEMO_D.FX_RATE
+(
+    fx_rate_id         BIGINT NOT NULL,
+    currency_pair      CHAR(7),
+    rate               DECIMAL(12,6),
+    rate_date          DATE,
+    source_updated_ts  TIMESTAMP(6),
+    td_update_ts       TIMESTAMP(6),
+    cdc_operation_cd   CHAR(1),
+    cdc_deleted_ind    BYTEINT DEFAULT 0
+)
+UNIQUE PRIMARY INDEX (fx_rate_id);
+
+.LOGOFF;
+.QUIT;

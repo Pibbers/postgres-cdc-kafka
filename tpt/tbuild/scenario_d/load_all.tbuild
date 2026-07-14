@@ -1,0 +1,282 @@
+/*=============================================================
+  Scenario D: 3 CSV topics -> 1 TPT job -> 3 target tables, ZERO landing tables.
+
+  Unlike A/B/C (Debezium JSON CDC), this source is a standalone synthetic CSV
+  feed (csv-load-generator/) - each Kafka message is already a flat, typed,
+  comma-delimited row (op_code,event_ts,<business columns>), so there's no
+  JSON envelope to land-and-shred. The job upserts straight into
+  DEMO_D.MERCHANT / BRANCH / FX_RATE via APPLY DML.
+
+  Mechanism (empirically verified against 192.168.1.205 on 2026-07-14 via a
+  throwaway 2-table spike before this script was written - see the "Phase 0"
+  section of the Scenario D build plan for the full writeup):
+    - One APPLY *statement* can hold multiple comma-joined APPLY *clauses*,
+      each with its own TO OPERATOR, all fed by ONE shared SELECT at the end.
+      This is what lets one job write to 3 different target tables.
+    - Consumer operators used this way MUST declare SCHEMA * (deferred) -
+      an explicit named schema throws TPT03107 ("Restricted APPLY statement
+      allows only deferred schema for consumer operators").
+    - NO modifiers (WHERE, IGNORE DUPLICATE ROWS, etc.) are accepted between
+      TO OPERATOR (...) and the next clause/the final SELECT in this
+      "Restricted APPLY Statement" grammar - confirmed via two separate
+      "missing SEMICOL_ in Rule: STEP" syntax errors when either was tried.
+      So per-table routing is done INSIDE the DML text instead: the UPDATE's
+      WHERE guards both the row match and the type-unsafe CAST via
+      "CASE WHEN :RECORD_TYPE='merchant' THEN CAST(...) END" (so a mismatched
+      row's CAST is never evaluated, avoiding a data-conversion error), and
+      the INSERT uses a guarded "SELECT ... WHERE :RECORD_TYPE='merchant'"
+      form instead of VALUES(...), so a 0-row SELECT just inserts nothing
+      instead of hitting a NOT NULL violation. Empirically confirmed: correct
+      routing, correct upsert, correct rejection of an out-of-order stale
+      update, zero cross-contamination between tables.
+    - Because the INSERT fires unconditionally (guarded only by RECORD_TYPE,
+      not by whether the row already exists), every successful UPDATE is
+      followed by a same-row INSERT attempt that hits a duplicate-key
+      violation and lands in that STREAM operator's own ErrorTable. This is
+      EXPECTED and harmless (per-row, not job-fatal) - IGNORE DUPLICATE ROWS
+      can't be used to silence it since that modifier isn't available in this
+      grammar position. Non-zero ErrorTable row counts are normal for this
+      design, not a failure signal.
+
+  Variables (substituted by run_tbuild.ps1 from the environment):
+    TD_HOST  TD_USER  TD_PASSWORD  TD_DATABASE
+    KAFKA_BOOTSTRAP  KAFKA_GROUP_ID  KAFKA_IDLE_TIMEOUT
+    KAFKA_DUMMY_DIR  KAFKA_AXSMOD_NAME
+
+  Run with: tbuild -f <this, pre-substituted> -j demo_d_all -l 5 -z 10
+=============================================================*/
+
+DEFINE JOB DEMO_D_LOAD_ALL
+DESCRIPTION 'Scenario D: 3 CSV topics -> 1 TPT job -> 3 target tables, no landing tables'
+(
+  DEFINE SCHEMA MERCHANT_SCHEMA
+  (
+    OP_CODE       VARCHAR(1),
+    EVENT_TS      VARCHAR(30),
+    MERCHANT_ID   VARCHAR(20),
+    MERCHANT_NAME VARCHAR(100),
+    MERCHANT_CATEGORY      VARCHAR(30),
+    M_CITY        VARCHAR(50),
+    COUNTRY       VARCHAR(2),
+    M_STATUS      VARCHAR(20)
+  );
+
+  DEFINE SCHEMA BRANCH_SCHEMA
+  (
+    OP_CODE       VARCHAR(1),
+    EVENT_TS      VARCHAR(30),
+    BRANCH_ID     VARCHAR(20),
+    BRANCH_NAME   VARCHAR(100),
+    B_CITY        VARCHAR(50),
+    REGION        VARCHAR(30),
+    B_STATUS      VARCHAR(20)
+  );
+
+  DEFINE SCHEMA FX_RATE_SCHEMA
+  (
+    OP_CODE       VARCHAR(1),
+    EVENT_TS      VARCHAR(30),
+    FX_RATE_ID    VARCHAR(20),
+    CURRENCY_PAIR VARCHAR(7),
+    RATE          VARCHAR(20),
+    RATE_DATE     VARCHAR(20)
+  );
+
+  /* Not attached to any operator (consumers below must use deferred SCHEMA *
+     per the Restricted APPLY constraint) - declared so the RECORD_TYPE
+     discriminator, a literal injected in the SELECT below rather than a real
+     wire field, has a named schema home. Without this, TPT03278 rejects
+     ":RECORD_TYPE" in the APPLY DML as an undefined derived column. */
+  DEFINE SCHEMA CSV_WIDE_SCHEMA
+  (
+    RECORD_TYPE        VARCHAR(10),
+    OP_CODE             VARCHAR(1),
+    EVENT_TS            VARCHAR(30),
+    MERCHANT_ID         VARCHAR(20),
+    MERCHANT_NAME       VARCHAR(100),
+    MERCHANT_CATEGORY   VARCHAR(30),
+    M_CITY              VARCHAR(50),
+    COUNTRY             VARCHAR(2),
+    M_STATUS            VARCHAR(20),
+    BRANCH_ID           VARCHAR(20),
+    BRANCH_NAME         VARCHAR(100),
+    B_CITY              VARCHAR(50),
+    REGION              VARCHAR(30),
+    B_STATUS            VARCHAR(20),
+    FX_RATE_ID          VARCHAR(20),
+    CURRENCY_PAIR       VARCHAR(7),
+    RATE                VARCHAR(20),
+    RATE_DATE           VARCHAR(20)
+  );
+
+  DEFINE OPERATOR KAFKA_MERCHANT
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA MERCHANT_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_csv_merchant',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = ',',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T csv.merchant -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_BRANCH
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA BRANCH_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_csv_branch',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = ',',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T csv.branch -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR KAFKA_FX_RATE
+  TYPE DATACONNECTOR PRODUCER
+  SCHEMA FX_RATE_SCHEMA
+  ATTRIBUTES
+  (
+    VARCHAR DirectoryPath       = '$(KAFKA_DUMMY_DIR)',
+    VARCHAR FileName            = 'kafka_stream_dummy_csv_fx_rate',
+    VARCHAR OpenMode            = 'Read',
+    VARCHAR EnableScan          = 'No',
+    VARCHAR Format              = 'DELIMITED',
+    VARCHAR TextDelimiter       = ',',
+    VARCHAR AccessModuleName    = '$(KAFKA_AXSMOD_NAME)',
+    VARCHAR AccessModuleInitStr = '-ADD_LINE_FEED y -M C -T csv.fx_rate -B $(KAFKA_BOOTSTRAP) -P * -X group.id=$(KAFKA_GROUP_ID) -W $(KAFKA_IDLE_TIMEOUT)'
+  );
+
+  DEFINE OPERATOR STREAM_MERCHANT
+  TYPE STREAM
+  SCHEMA *
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).MERCHANT',
+    INTEGER MaxSessions   = 2,
+    INTEGER MinSessions   = 2,
+    VARCHAR ArraySupport  = 'Off',
+    VARCHAR LogTable      = '$(TD_DATABASE).MERCHANT_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).MERCHANT_ET'
+  );
+
+  DEFINE OPERATOR STREAM_BRANCH
+  TYPE STREAM
+  SCHEMA *
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).BRANCH',
+    INTEGER MaxSessions   = 2,
+    INTEGER MinSessions   = 2,
+    VARCHAR ArraySupport  = 'Off',
+    VARCHAR LogTable      = '$(TD_DATABASE).BRANCH_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).BRANCH_ET'
+  );
+
+  DEFINE OPERATOR STREAM_FX_RATE
+  TYPE STREAM
+  SCHEMA *
+  ATTRIBUTES
+  (
+    VARCHAR TdpId         = '$(TD_HOST)',
+    VARCHAR UserName      = '$(TD_USER)',
+    VARCHAR UserPassword  = '$(TD_PASSWORD)',
+    VARCHAR TargetTable   = '$(TD_DATABASE).FX_RATE',
+    INTEGER MaxSessions   = 2,
+    INTEGER MinSessions   = 2,
+    VARCHAR ArraySupport  = 'Off',
+    VARCHAR LogTable      = '$(TD_DATABASE).FX_RATE_LT',
+    VARCHAR ErrorTable    = '$(TD_DATABASE).FX_RATE_ET'
+  );
+
+  STEP MAIN_STEP
+  (
+    APPLY
+    (
+      'UPDATE $(TD_DATABASE).MERCHANT SET merchant_name=:MERCHANT_NAME, category=:MERCHANT_CATEGORY, city=:M_CITY,
+         country=:COUNTRY, status=:M_STATUS, source_updated_ts=CAST(:EVENT_TS AS TIMESTAMP(6)),
+         td_update_ts=CURRENT_TIMESTAMP(6), cdc_operation_cd=:OP_CODE,
+         cdc_deleted_ind=CASE WHEN :OP_CODE=''D'' THEN 1 ELSE 0 END
+       WHERE :RECORD_TYPE=''merchant''
+         AND merchant_id=CASE WHEN :RECORD_TYPE=''merchant'' THEN CAST(:MERCHANT_ID AS BIGINT) END
+         AND CAST(:EVENT_TS AS TIMESTAMP(6)) > source_updated_ts;',
+      'INSERT INTO $(TD_DATABASE).MERCHANT (merchant_id, merchant_name, category, city, country, status,
+         source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+       SELECT CASE WHEN :RECORD_TYPE=''merchant'' THEN CAST(:MERCHANT_ID AS BIGINT) END, :MERCHANT_NAME,
+              :MERCHANT_CATEGORY, :M_CITY, :COUNTRY, :M_STATUS, CAST(:EVENT_TS AS TIMESTAMP(6)),
+              CURRENT_TIMESTAMP(6), :OP_CODE, 0
+       WHERE :RECORD_TYPE=''merchant'';'
+    )
+    TO OPERATOR (STREAM_MERCHANT)
+    ,
+    APPLY
+    (
+      'UPDATE $(TD_DATABASE).BRANCH SET branch_name=:BRANCH_NAME, city=:B_CITY, region=:REGION, status=:B_STATUS,
+         source_updated_ts=CAST(:EVENT_TS AS TIMESTAMP(6)), td_update_ts=CURRENT_TIMESTAMP(6),
+         cdc_operation_cd=:OP_CODE, cdc_deleted_ind=CASE WHEN :OP_CODE=''D'' THEN 1 ELSE 0 END
+       WHERE :RECORD_TYPE=''branch''
+         AND branch_id=CASE WHEN :RECORD_TYPE=''branch'' THEN CAST(:BRANCH_ID AS BIGINT) END
+         AND CAST(:EVENT_TS AS TIMESTAMP(6)) > source_updated_ts;',
+      'INSERT INTO $(TD_DATABASE).BRANCH (branch_id, branch_name, city, region, status,
+         source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+       SELECT CASE WHEN :RECORD_TYPE=''branch'' THEN CAST(:BRANCH_ID AS BIGINT) END, :BRANCH_NAME,
+              :B_CITY, :REGION, :B_STATUS, CAST(:EVENT_TS AS TIMESTAMP(6)),
+              CURRENT_TIMESTAMP(6), :OP_CODE, 0
+       WHERE :RECORD_TYPE=''branch'';'
+    )
+    TO OPERATOR (STREAM_BRANCH)
+    ,
+    APPLY
+    (
+      'UPDATE $(TD_DATABASE).FX_RATE SET currency_pair=:CURRENCY_PAIR, rate=CAST(:RATE AS DECIMAL(12,6)),
+         rate_date=CAST(:RATE_DATE AS DATE), source_updated_ts=CAST(:EVENT_TS AS TIMESTAMP(6)),
+         td_update_ts=CURRENT_TIMESTAMP(6), cdc_operation_cd=:OP_CODE,
+         cdc_deleted_ind=CASE WHEN :OP_CODE=''D'' THEN 1 ELSE 0 END
+       WHERE :RECORD_TYPE=''fx_rate''
+         AND fx_rate_id=CASE WHEN :RECORD_TYPE=''fx_rate'' THEN CAST(:FX_RATE_ID AS BIGINT) END
+         AND CAST(:EVENT_TS AS TIMESTAMP(6)) > source_updated_ts;',
+      'INSERT INTO $(TD_DATABASE).FX_RATE (fx_rate_id, currency_pair, rate, rate_date,
+         source_updated_ts, td_update_ts, cdc_operation_cd, cdc_deleted_ind)
+       SELECT CASE WHEN :RECORD_TYPE=''fx_rate'' THEN CAST(:FX_RATE_ID AS BIGINT) END, :CURRENCY_PAIR,
+              CAST(:RATE AS DECIMAL(12,6)), CAST(:RATE_DATE AS DATE), CAST(:EVENT_TS AS TIMESTAMP(6)),
+              CURRENT_TIMESTAMP(6), :OP_CODE, 0
+       WHERE :RECORD_TYPE=''fx_rate'';'
+    )
+    TO OPERATOR (STREAM_FX_RATE)
+    SELECT 'merchant' AS RECORD_TYPE, OP_CODE, EVENT_TS, MERCHANT_ID, MERCHANT_NAME, MERCHANT_CATEGORY, M_CITY, COUNTRY, M_STATUS,
+           CAST(NULL AS VARCHAR(20)) AS BRANCH_ID, CAST(NULL AS VARCHAR(100)) AS BRANCH_NAME, CAST(NULL AS VARCHAR(50)) AS B_CITY,
+           CAST(NULL AS VARCHAR(30)) AS REGION, CAST(NULL AS VARCHAR(20)) AS B_STATUS,
+           CAST(NULL AS VARCHAR(20)) AS FX_RATE_ID, CAST(NULL AS VARCHAR(7)) AS CURRENCY_PAIR,
+           CAST(NULL AS VARCHAR(20)) AS RATE, CAST(NULL AS VARCHAR(20)) AS RATE_DATE
+    FROM OPERATOR (KAFKA_MERCHANT)
+    UNION ALL
+    SELECT 'branch' AS RECORD_TYPE, OP_CODE, EVENT_TS,
+           CAST(NULL AS VARCHAR(20)) AS MERCHANT_ID, CAST(NULL AS VARCHAR(100)) AS MERCHANT_NAME, CAST(NULL AS VARCHAR(30)) AS MERCHANT_CATEGORY,
+           CAST(NULL AS VARCHAR(50)) AS M_CITY, CAST(NULL AS VARCHAR(2)) AS COUNTRY, CAST(NULL AS VARCHAR(20)) AS M_STATUS,
+           BRANCH_ID, BRANCH_NAME, B_CITY, REGION, B_STATUS,
+           CAST(NULL AS VARCHAR(20)) AS FX_RATE_ID, CAST(NULL AS VARCHAR(7)) AS CURRENCY_PAIR,
+           CAST(NULL AS VARCHAR(20)) AS RATE, CAST(NULL AS VARCHAR(20)) AS RATE_DATE
+    FROM OPERATOR (KAFKA_BRANCH)
+    UNION ALL
+    SELECT 'fx_rate' AS RECORD_TYPE, OP_CODE, EVENT_TS,
+           CAST(NULL AS VARCHAR(20)) AS MERCHANT_ID, CAST(NULL AS VARCHAR(100)) AS MERCHANT_NAME, CAST(NULL AS VARCHAR(30)) AS MERCHANT_CATEGORY,
+           CAST(NULL AS VARCHAR(50)) AS M_CITY, CAST(NULL AS VARCHAR(2)) AS COUNTRY, CAST(NULL AS VARCHAR(20)) AS M_STATUS,
+           CAST(NULL AS VARCHAR(20)) AS BRANCH_ID, CAST(NULL AS VARCHAR(100)) AS BRANCH_NAME, CAST(NULL AS VARCHAR(50)) AS B_CITY,
+           CAST(NULL AS VARCHAR(30)) AS REGION, CAST(NULL AS VARCHAR(20)) AS B_STATUS,
+           FX_RATE_ID, CURRENCY_PAIR, RATE, RATE_DATE
+    FROM OPERATOR (KAFKA_FX_RATE);
+  );
+);
