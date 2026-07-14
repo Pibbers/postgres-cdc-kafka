@@ -13,6 +13,7 @@
   <a href="/static/pages/scenario-a.html">Scenario A</a>
   <a href="/static/pages/scenario-b.html">Scenario B</a>
   <a href="/static/pages/scenario-c.html">Scenario C</a>
+  <a href="/static/pages/scenario-d.html">Scenario D</a>
   <a href="/static/pages/scaling.html">Scaling to 500</a>
   <span class="spacer"></span>
   <a href="/" class="live-link">&#9679; Live dashboard</a>
@@ -21,7 +22,7 @@
 
   <div class="eyebrow">Demo overview</div>
   <h1>What this demo is</h1>
-  <p class="subtitle">One live CDC stream, three architectures, watched side by side.</p>
+  <p class="subtitle">Four topologies, watched side by side — three sharing one live CDC stream, plus a fourth that swaps the source for flat CSV.</p>
 
   <h2>The setup</h2>
   <p>
@@ -34,6 +35,13 @@
     through three separate consumer groups and load into three parallel Teradata schemas (<code>DEMO_A</code>, <code>DEMO_B</code>, <code>DEMO_C</code>).
     Nothing is simulated or replayed: all three run continuously, concurrently, against identical live data, so row counts and
     latency are directly comparable in real time.
+  </p>
+  <p>
+    <strong>Scenario D runs alongside them, but deliberately isn't part of the same stream.</strong> A separate, standalone
+    generator publishes flat CSV rows for 3 new reference tables (<code>merchant</code>, <code>branch</code>, <code>fx_rate</code>)
+    straight to 3 Kafka topics — no Postgres, no Debezium. It exists to answer a different question than A/B/C do: not "how do
+    you consolidate CDC ingest," but "what changes when the source data is already flat instead of semi-structured JSON."
+    See the dedicated <a href="/static/pages/scenario-d.html">Scenario D</a> page for why that distinction matters mechanically.
   </p>
 
   <!-- SVG architecture diagram -->
@@ -100,7 +108,7 @@
     </svg>
   </div>
 
-  <h2>The three scenarios, at a glance</h2>
+  <h2>The four scenarios, at a glance</h2>
   <table>
     <thead><tr><th>Scenario</th><th>Shape</th><th>What it shows</th></tr></thead>
     <tbody>
@@ -119,10 +127,16 @@
         <td>5 topics &rarr; <strong>2 tiered TPT jobs</strong> (1 hot + 1 warm/cold) &rarr; 5 target tables</td>
         <td>The middle ground: per-table isolation only where it earns its keep, consolidation everywhere else.</td>
       </tr>
+      <tr>
+        <td><span class="tag tag-d">D</span></td>
+        <td>3 <em>non-CDC</em> topics &rarr; <strong>1 consolidated TPT job</strong> &rarr; <strong>0 landing tables</strong> &rarr; 3 target tables</td>
+        <td>Same "one job" idea as B, but the source is already flat CSV, not semi-structured JSON — so the landing table and merge step disappear entirely.</td>
+      </tr>
     </tbody>
   </table>
   <p>See the dedicated <a href="/static/pages/scenario-a.html">Scenario A</a>, <a href="/static/pages/scenario-b.html">Scenario B</a>,
-     and <a href="/static/pages/scenario-c.html">Scenario C</a> pages for how each one actually works and what to expect on screen.</p>
+     <a href="/static/pages/scenario-c.html">Scenario C</a>, and <a href="/static/pages/scenario-d.html">Scenario D</a>
+     pages for how each one actually works and what to expect on screen.</p>
 
   <h2>Why three scenarios instead of just building the "right" one</h2>
   <p>
@@ -134,35 +148,59 @@
     apply isolation only where the latency SLA actually demands it.
   </p>
 
+  <h2>A fourth topology, a different premise</h2>
+  <p>
+    Scenario B's landing-table-plus-fan-out-merge pattern exists to solve a specific problem: Debezium's JSON envelope
+    (<code>before</code>/<code>after</code>/<code>source</code>) doesn't map onto flat TPT <code>SCHEMA</code> columns, so it
+    gets landed as raw text and shredded later by a downstream <code>MERGE</code>. Scenario D asks what happens to that pattern
+    when the source data is already flat and typed — and the answer, verified live against a real Teradata target, is that it
+    disappears entirely. One TPT job, three comma-joined <code>APPLY</code> clauses sharing one <code>SELECT</code>, upserting
+    straight into <code>DEMO_D.MERCHANT</code> / <code>BRANCH</code> / <code>FX_RATE</code> — zero landing tables, zero merge
+    routines.
+  </p>
+  <p>
+    This is the same MultiLoad-derived mechanism TPT has supported for decades (up to 5 target tables from one job), just not
+    previously exercised in this demo. It's not a strictly-better replacement for Scenario B's CDC pattern — Scenario D trades
+    away the landing table's raw-payload audit/replay trail, which matters if a customer's compliance story leans on staged
+    raw-event retention. It's the same "consolidate ingest" thesis Scenario B argues for, one step further, for the subset of
+    real-world sources — batch extracts, pre-normalized message-queue feeds, application event streams with a fixed schema —
+    where the data shape allows skipping the landing tier altogether. See the <a href="/static/pages/scenario-d.html">Scenario D</a>
+    page for the exact TPT grammar and the constraints found only by hitting them.
+  </p>
+
   <h2>What you'll see on the live dashboard</h2>
   <p>
-    The <a href="/">dashboard</a> shows one card per scenario: how many of its jobs are running, total rows landed, an
-    overhead readout (CPU%, memory, process count, and Teradata session count for that scenario's jobs), a per-table
-    breakdown with row deltas, landing latency, and landing-table backlog, and start/kill/restart controls for every job.
-    Below the cards, a single chart tracks end-to-end latency (source commit &rarr; Teradata landing) for all three
-    scenarios at once — that latency line is the single most persuasive number in the room, because it's the same
-    underlying data hitting three different pipelines simultaneously.
+    The <a href="/">dashboard</a> shows one card per scenario — <strong>four now</strong>, A through D: how many of its jobs
+    are running, total rows landed, an overhead readout (CPU%, memory, process count, and Teradata session count for that
+    scenario's jobs), a per-table breakdown with row deltas, landing latency, and landing-table backlog, and start/kill/restart
+    controls for every job. Below the cards, a single chart tracks end-to-end latency (source commit &rarr; Teradata landing)
+    for all four scenarios at once — that latency line is the single most persuasive number in the room, because it's real
+    data hitting four different pipelines simultaneously.
   </p>
   <p>
     The overhead readout is where the isolation-vs-consolidation tradeoff stops being an abstract argument: Scenario A's
     card shows 5 processes and 10 sessions running the same table set that Scenario B's card shows as 1 process and 2
     sessions. Backlog (rows landed but not yet merged+purged) is the closest available proxy for consumer lag, since
     TPT's Kafka Access Module doesn't join Kafka's consumer-group protocol and true lag isn't observable through the
-    standard admin API.
+    standard admin API — <strong>except on Scenario D's card, where backlog reads 0 by design</strong>: there's no landing
+    table for anything to back up in, and that's the point being made.
   </p>
   <p>
-    Top-level <strong>"Start everything" / "Stop everything"</strong> buttons launch or kill all 8 TPT jobs plus the merge
-    loop in one click, for resetting the whole room-facing state between runs without walking each scenario's controls
-    individually. A <strong>merge speed toggle</strong> restarts the merge loop at a faster cadence (1s instead of the
-    default 3s) so you can show landing latency drop live — useful for demonstrating that the merge interval, not the TPT
-    flush, is usually the dominant term in end-to-end latency.
+    Top-level <strong>"Start everything" / "Stop everything"</strong> buttons launch or kill all 9 TPT jobs (5 in A, 1 in B,
+    2 in C, 1 in D) plus the merge loop in one click, for resetting the whole room-facing state between runs without walking
+    each scenario's controls individually. A <strong>merge speed toggle</strong> restarts the merge loop at a faster cadence
+    (1s instead of the default 3s) so you can show landing latency drop live — useful for demonstrating that the merge
+    interval, not the TPT flush, is usually the dominant term in end-to-end latency for A/B/C. Scenario D has no merge loop
+    to speed up — its latency is TPT flush time alone, which is exactly the comparison worth making live.
   </p>
   <p>
-    A <strong>burst load</strong> button spikes traffic (weighted toward <code>transaction</code>) so you can watch all three
-    scenarios respond to the same load spike side by side — each trigger is marked with a dashed line directly on the
+    A <strong>burst load</strong> button spikes traffic on both the main load generator (weighted toward <code>transaction</code>,
+    feeding A/B/C) and the CSV load generator (weighted toward <code>fx_rate</code>, feeding D) at once, so you can watch all
+    four scenarios respond to the same moment side by side — each trigger is marked with a dashed line directly on the
     latency chart, so the room can see cause and effect without you having to narrate the timing. Kill/restart buttons on
     individual jobs demonstrate the isolation-vs-consolidation tradeoff directly: killing a Scenario A job stops only its
-    one table; killing Scenario B's single job stops all 5.
+    one table; killing Scenario B's single job stops all 5; killing Scenario D's single job stops all 3 of its tables too,
+    the same shared-fate tradeoff as B, just without a landing table underneath it.
   </p>
 
   <h2>What this maps back to</h2>
@@ -171,7 +209,9 @@
     topics / 500 source tables</strong> would face. Every mechanism on screen — consumer groups, landing tables, idempotent
     merges, job counts — is the same mechanism that would run at that scale, just smaller. The
     <a href="/static/pages/scaling.html">scaling page</a> walks through exactly how the numbers extrapolate, including the
-    corrected Teradata session-concurrency math behind the "500 independent jobs doesn't work" claim.
+    corrected Teradata session-concurrency math behind the "500 independent jobs doesn't work" claim. Scenario D maps back
+    differently — not to the 500-topic CDC question, but to whichever fraction of a customer's 500 tables come from sources
+    that are already flat rather than semi-structured, where the landing tier itself can be designed away.
   </p>
 
   <div class="pagenav">

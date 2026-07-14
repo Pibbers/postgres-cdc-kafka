@@ -28,6 +28,8 @@ This demo exists to make that argument **visually and technically concrete** at 
 
 All three scenarios consume the **same 5 Debezium/Kafka topics**, produced by the **same Postgres source**, at the **same moment**, via three independent Kafka consumer groups, and land into **three parallel Teradata schemas** (`DEMO_A`, `DEMO_B`, `DEMO_C`). This means the demo needs no fragile "reset and replay" choreography — all three run continuously and concurrently, and the presenter just switches which dashboard panel / SQL terminal they're pointing at.
 
+**A fourth topology, Scenario D, was added later** (see `docs/scenario-d-csv-direct-load.md`) — a standalone synthetic CSV feed (not Postgres/Debezium CDC) that shows what happens to Scenario B's landing-table-plus-merge pattern when the source data is already flat and typed rather than semi-structured JSON: it can be skipped entirely, with TPT upserting straight into the target tables from one consolidated job.
+
 The demo should close by explicitly re-projecting the 5-table mechanics onto the 500-table numbers from the prior research (Section 11), so the audience sees the line from "what you just watched" to "what we'd build for you."
 
 ---

@@ -199,6 +199,7 @@ strong { color: #fff; font-weight: 600; }
 .tag-a { background: rgba(4,206,126,0.15); color: var(--green); border: 1px solid rgba(4,206,126,0.30); }
 .tag-b { background: rgba(196,183,241,0.15); color: var(--lavender); border: 1px solid rgba(196,183,241,0.30); }
 .tag-c { background: rgba(255,95,2,0.15); color: #ffaa66; border: 1px solid rgba(255,95,2,0.30); }
+.tag-d { background: rgba(48,83,244,0.15); color: #7d97fb; border: 1px solid rgba(48,83,244,0.30); }
 
 /* --- Tables --- */
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 16px 0; }

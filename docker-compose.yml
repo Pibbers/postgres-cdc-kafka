@@ -99,5 +99,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  csv-load-generator:
+    build:
+      context: ./csv-load-generator
+    container_name: csv-load-generator
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BOOTSTRAP: "kafka:19092"
+      CSV_LOAD_GEN_STEADY_RATE: "${CSV_LOAD_GEN_STEADY_RATE:-2}"
+      CSV_LOAD_GEN_BURST_RATE: "${CSV_LOAD_GEN_BURST_RATE:-60}"
+      CSV_LOAD_GEN_BURST_SECONDS: "${CSV_LOAD_GEN_BURST_SECONDS:-20}"
+    ports:
+      - "8092:8092"
+    depends_on:
+      kafka:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   postgres-data:

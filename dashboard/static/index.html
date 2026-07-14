@@ -76,10 +76,11 @@
     <a href="/static/pages/scenario-a.html">Scenario A</a>
     <a href="/static/pages/scenario-b.html">Scenario B</a>
     <a href="/static/pages/scenario-c.html">Scenario C</a>
+    <a href="/static/pages/scenario-d.html">Scenario D</a>
     <a href="/static/pages/scaling.html">Scaling to 500</a>
   </nav>
   <div class="main">
-  <h1>Kafka CDC &rarr; TPT &rarr; Teradata &mdash; Scenario A vs B vs C</h1>
+  <h1>Kafka CDC &rarr; TPT &rarr; Teradata &mdash; Scenario A vs B vs C vs D</h1>
   <div id="controls">
     <button onclick="startAll()">Start everything</button>
     <button class="stop-all" onclick="stopAll()">Stop everything</button>
@@ -96,8 +97,8 @@
   </div>
 
 <script>
-const SCENARIOS = ["A", "B", "C"];
-const latencyHistory = { A: [], B: [], C: [] };
+const SCENARIOS = ["A", "B", "C", "D"];
+const latencyHistory = { A: [], B: [], C: [], D: [] };
 const prevCounts = {};
 const MAX_POINTS = 30;
 const labelEpochs = [];   // wall-clock ms per chart label, parallel to chart.data.labels
@@ -146,8 +147,8 @@ const chart = new Chart(ctx, {
     datasets: SCENARIOS.map((s, i) => ({
       label: 'Scenario ' + s,
       data: [],
-      borderColor: ['#04CE7E', '#C4B7F1', '#FF5F02'][i],
-      backgroundColor: ['rgba(4,206,126,0.08)', 'rgba(196,183,241,0.08)', 'rgba(255,95,2,0.08)'][i],
+      borderColor: ['#04CE7E', '#C4B7F1', '#FF5F02', '#3053F4'][i],
+      backgroundColor: ['rgba(4,206,126,0.08)', 'rgba(196,183,241,0.08)', 'rgba(255,95,2,0.08)', 'rgba(48,83,244,0.08)'][i],
       tension: 0.3,
       pointRadius: 0,
       borderWidth: 2,
@@ -280,7 +281,6 @@ async function refresh() {
     }
 
     const res = sc.resources || {};
-    const cpuTxt = res.cpu_percent !== null && res.cpu_percent !== undefined ? res.cpu_percent.toFixed(1) + '%' : '–';
     const memTxt = res.memory_mb !== null && res.memory_mb !== undefined ? res.memory_mb.toFixed(0) + ' MB' : '–';
     const procCount = res.process_count || 0;
     const sessionCount = res.sessions || 0;
@@ -289,7 +289,7 @@ async function refresh() {
       <h2>Scenario ${s} <span class="tag">${runningCount}/${jobCount} jobs running</span></h2>
       <div class="metric-big">${totalRows}</div>
       <div class="metric-label">total rows in target tables</div>
-      <div class="metric-label">overhead: ${cpuTxt} CPU &middot; ${memTxt} &middot; ${procCount} process${procCount === 1 ? '' : 'es'} &middot; ${sessionCount} Teradata session${sessionCount === 1 ? '' : 's'}</div>
+      <div class="metric-label">overhead: ${memTxt} &middot; ${procCount} process${procCount === 1 ? '' : 'es'} &middot; ${sessionCount} Teradata session${sessionCount === 1 ? '' : 's'}</div>
       <table><thead><tr><th>table</th><th>rows</th><th>Δ</th><th>latency</th><th>backlog</th></tr></thead>
       <tbody>${fmtTables(s, tables)}</tbody></table>
       <table style="margin-top:8px;"><thead><tr><th>job</th><th>status</th><th>controls</th></tr></thead>
