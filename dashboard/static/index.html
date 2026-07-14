@@ -281,7 +281,6 @@ async function refresh() {
     }
 
     const res = sc.resources || {};
-    const cpuTxt = res.cpu_percent !== null && res.cpu_percent !== undefined ? res.cpu_percent.toFixed(1) + '%' : '–';
     const memTxt = res.memory_mb !== null && res.memory_mb !== undefined ? res.memory_mb.toFixed(0) + ' MB' : '–';
     const procCount = res.process_count || 0;
     const sessionCount = res.sessions || 0;
@@ -290,7 +289,7 @@ async function refresh() {
       <h2>Scenario ${s} <span class="tag">${runningCount}/${jobCount} jobs running</span></h2>
       <div class="metric-big">${totalRows}</div>
       <div class="metric-label">total rows in target tables</div>
-      <div class="metric-label">overhead: ${cpuTxt} CPU &middot; ${memTxt} &middot; ${procCount} process${procCount === 1 ? '' : 'es'} &middot; ${sessionCount} Teradata session${sessionCount === 1 ? '' : 's'}</div>
+      <div class="metric-label">overhead: ${memTxt} &middot; ${procCount} process${procCount === 1 ? '' : 'es'} &middot; ${sessionCount} Teradata session${sessionCount === 1 ? '' : 's'}</div>
       <table><thead><tr><th>table</th><th>rows</th><th>Δ</th><th>latency</th><th>backlog</th></tr></thead>
       <tbody>${fmtTables(s, tables)}</tbody></table>
       <table style="margin-top:8px;"><thead><tr><th>job</th><th>status</th><th>controls</th></tr></thead>

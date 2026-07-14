@@ -93,7 +93,6 @@ merge_interval = MERGE_NORMAL_INTERVAL  # best-known -IntervalSeconds of the run
 metrics = {"scenarios": {}, "merge_loop": {}, "updated_at": None, "burst_events": []}
 metrics_lock = threading.Lock()
 
-_cpu_samples = {}  # pid -> (timestamp, cumulative_cpu_100ns), for CPU% deltas across polls
 burst_events = []  # epoch-seconds of recent /api/burst triggers, for chart annotation
 
 CHECKPOINT_DIR = r"C:\Program Files\Teradata\client\20.00\Teradata Parallel Transporter\checkpoint"
@@ -162,16 +161,22 @@ def discover_external_processes():
     # argument each tbuild.exe was started with, and the merge loop by matching
     # its script name among running powershell.exe processes.
     #
-    # WorkingSetSize/KernelModeTime/UserModeTime are pulled in the same call so
-    # the resource-overhead panel doesn't need a second round-trip; they're only
-    # meaningful (and only collected) for the actual tbuild.exe worker, not the
-    # powershell.exe wrapper that launched it, since that's what "the job costs
-    # this much CPU/memory" should reflect.
+    # WorkingSetSize is pulled in the same call so the resource-overhead panel
+    # doesn't need a second round-trip; it's only meaningful (and only
+    # collected) for the actual tbuild.exe worker, not the powershell.exe
+    # wrapper that launched it, since that's what "the job costs this much
+    # memory" should reflect. (CPU% was tried here too - both the local
+    # tbuild.exe process's own CPU, which is ~always 0 since TPT is I/O-bound
+    # waiting on Kafka/Teradata, and Teradata-side CPU via DBC.AMPUsage, which
+    # is real but flushes on a multi-minute granularity, not live - neither
+    # was informative enough to justify showing on a 3s-poll dashboard, so
+    # both were dropped. Decided 2026-07-14 after empirically confirming the
+    # AMPUsage flush latency against the live box.)
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process -Filter \"Name='tbuild.exe' OR Name='powershell.exe'\" "
-             "| Select-Object ProcessId,Name,CommandLine,WorkingSetSize,KernelModeTime,UserModeTime "
+             "| Select-Object ProcessId,Name,CommandLine,WorkingSetSize "
              "| ConvertTo-Json -Compress"],
             capture_output=True, text=True, timeout=10,
         )
@@ -192,31 +197,12 @@ def discover_external_processes():
                 resource_by_job[m.group(1)] = {
                     "pid": proc.get("ProcessId"),
                     "memory_mb": (proc.get("WorkingSetSize") or 0) / (1024 * 1024),
-                    "cpu_100ns": (proc.get("KernelModeTime") or 0) + (proc.get("UserModeTime") or 0),
                 }
         if "run_merge_loop.ps1" in cmdline:
             merge_pid = proc.get("ProcessId")
             im = re.search(r"-IntervalSeconds\s+(\d+)", cmdline)
             merge_interval_found = int(im.group(1)) if im else MERGE_NORMAL_INTERVAL
     return jobs_found, merge_pid, merge_interval_found, resource_by_job
-
-
-def cpu_percent(pid, cpu_100ns, now):
-    # Win32_Process's Kernel/UserModeTime are cumulative since process start
-    # (100ns units), not a live %, so CPU% has to be derived from the delta
-    # between two polls. Normalized by logical core count to match Task
-    # Manager's convention (100% = one fully-loaded core, not "all cores").
-    ncpu = os.cpu_count() or 1
-    prev = _cpu_samples.get(pid)
-    _cpu_samples[pid] = (now, cpu_100ns)
-    if not prev:
-        return 0.0
-    prev_t, prev_cpu = prev
-    dt = now - prev_t
-    dcpu = cpu_100ns - prev_cpu
-    if dt <= 0 or dcpu < 0:
-        return 0.0
-    return (dcpu / 1e7) / dt / ncpu * 100
 
 
 def job_status(job_name):
@@ -284,12 +270,8 @@ def poll_metrics():
         try:
             jobs_found, found_merge_pid, found_merge_interval, resource_by_job = discover_external_processes()
             external_pids = jobs_found
-            now = time.time()
             job_resources = {
-                job_name: {
-                    "cpu_percent": round(cpu_percent(r["pid"], r["cpu_100ns"], now), 1),
-                    "memory_mb": round(r["memory_mb"], 1),
-                }
+                job_name: {"memory_mb": round(r["memory_mb"], 1)}
                 for job_name, r in resource_by_job.items()
             }
             if merge_process is None:
@@ -373,17 +355,14 @@ def poll_metrics():
                 res = job_resources.get(job_name)
                 scenarios[spec["scenario"]].setdefault("jobs", {})[job_name] = {
                     "status": job_status(job_name),
-                    "cpu_percent": res["cpu_percent"] if res else None,
                     "memory_mb": res["memory_mb"] if res else None,
                 }
 
             for scenario, sc in scenarios.items():
                 jobs = sc.get("jobs", {})
-                cpu_vals = [j["cpu_percent"] for j in jobs.values() if j["cpu_percent"] is not None]
                 mem_vals = [j["memory_mb"] for j in jobs.values() if j["memory_mb"] is not None]
                 running_count = sum(1 for j in jobs.values() if j["status"] == "running")
                 sc["resources"] = {
-                    "cpu_percent": round(sum(cpu_vals), 1) if cpu_vals else None,
                     "memory_mb": round(sum(mem_vals), 1) if mem_vals else None,
                     "process_count": len(mem_vals),
                     "sessions": running_count * TPT_SESSIONS_PER_JOB,
