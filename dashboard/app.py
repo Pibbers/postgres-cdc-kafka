@@ -293,7 +293,7 @@ def poll_metrics():
 
             for (scenario, table), target in TARGET_TABLES.items():
                 try:
-                    rows = td_query(cur, f"SELECT COUNT(*), MAX(td_update_ts) FROM {target}")
+                    rows = td_query(cur, f"LOCKING ROW FOR ACCESS SELECT COUNT(*), MAX(td_update_ts) FROM {target}")
                     count, max_ts = rows[0]
                 except Exception:
                     count, max_ts = None, None
@@ -305,6 +305,7 @@ def poll_metrics():
                 ts_field_map = {"transaction": "transaction_ts", "payment": "payment_ts"}
                 try:
                     rows = td_query(cur, f"""
+                        LOCKING ROW FOR ACCESS
                         SELECT (INGEST_TS -
                             (CAST(DATE '1970-01-01' + (CAST(PAYLOAD.source.ts_ms AS BIGINT)/1000/86400) AS TIMESTAMP(6))
                               + (((CAST(PAYLOAD.source.ts_ms AS BIGINT)/1000) MOD 86400) / 3600) * INTERVAL '1' HOUR
@@ -322,7 +323,7 @@ def poll_metrics():
                 # (see README "Known limitations") - this is the closest
                 # available proxy for "is this pipeline falling behind."
                 try:
-                    rows2 = td_query(cur, f"SELECT COUNT(*) FROM {landing}")
+                    rows2 = td_query(cur, f"LOCKING ROW FOR ACCESS SELECT COUNT(*) FROM {landing}")
                     backlog = rows2[0][0] if rows2 else None
                 except Exception:
                     backlog = None
@@ -347,6 +348,7 @@ def poll_metrics():
                     continue
                 try:
                     rows = td_query(cur, f"""
+                        LOCKING ROW FOR ACCESS
                         SELECT (td_update_ts - source_updated_ts) DAY(4) TO SECOND(6)
                         FROM (SELECT TOP 1 td_update_ts, source_updated_ts FROM {target} ORDER BY td_update_ts DESC) t
                     """)
