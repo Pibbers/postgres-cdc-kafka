@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Scenario D — Kafka CDC → TPT → Teradata Demo</title>
+<title>Scenario D — Direct Multi-Table Load</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -21,34 +21,46 @@
 <div class="page">
 
   <div class="eyebrow">Scenario D</div>
-  <h1>When the data's already flat: skip the landing table entirely</h1>
-  <p class="subtitle">Same "one consolidated job" idea as Scenario B — but because this source is CSV, not semi-structured JSON, there's no landing table and no separate merge process at all.</p>
+  <h1>Flat source, direct load, no staging tier</h1>
+  <p class="subtitle">One consolidated job as in Scenario B — but because the source is already flat and typed, TPT upserts straight into the target tables. No landing table, no merge routine.</p>
 
-  <div class="callout">
-    <p><strong>The pitch this scenario proves:</strong> Scenario B's landing-table-plus-fan-out-merge pattern exists to solve
-    a specific problem — Debezium's JSON envelope (<code>before</code>/<code>after</code>/<code>source</code>) doesn't map
-    onto flat TPT <code>SCHEMA</code> columns, so it gets landed as raw text and shredded later by a downstream <code>MERGE</code>.
-    When the source is already flat and typed — three new reference-style feeds (<code>merchant</code>, <code>branch</code>,
-    <code>fx_rate</code>), <strong>not</strong> Postgres/Debezium CDC — that problem doesn't exist, and TPT can
-    <code>APPLY</code>-upsert straight into the real target tables from one job. No landing table, no merge loop, no BTEQ script.</p>
+  <h2>What this scenario covers</h2>
+  <p>
+    Scenario B's landing-table-plus-fan-out-merge exists to solve one specific problem: a Debezium change
+    envelope is semi-structured JSON (<code>before</code> / <code>after</code> / <code>source</code>) and does not
+    map onto flat TPT <code>SCHEMA</code> columns, so it is landed verbatim as text and shredded downstream.
+  </p>
+  <p>
+    Scenario D asks what remains of that pattern when the source data is <strong>already flat and typed</strong>.
+    The answer, running live here, is that the staging tier disappears entirely: one TPT job, three
+    comma-joined <code>APPLY</code> clauses sharing one <code>SELECT</code>, upserting directly into
+    <code>DEMO_D.MERCHANT</code>, <code>BRANCH</code> and <code>FX_RATE</code>. Zero landing tables, zero merge
+    routines, zero scheduled downstream work.
+  </p>
+  <div class="callout info">
+    <p><strong>A deliberately different premise.</strong> Scenario D is not fed by Postgres or Debezium. A
+    standalone generator publishes flat CSV rows for three reference-style feeds
+    (<code>merchant</code>, <code>branch</code>, <code>fx_rate</code>) straight to Kafka. It sits alongside
+    A/B/C rather than competing with them, because it answers a different question: not "how do you consolidate
+    CDC ingest," but "what changes when the source shape is already flat."</p>
   </div>
 
   <h2>Shape</h2>
   <table>
     <tbody>
-      <tr><td>Kafka topics</td><td>3 — <code>csv.merchant</code>, <code>csv.branch</code>, <code>csv.fx_rate</code> (a standalone synthetic CSV feed, not Debezium)</td></tr>
-      <tr><td>TPT jobs</td><td><strong>1</strong> — <code>demo_d_all</code></td></tr>
+      <tr><td>Kafka topics</td><td>3 — <code>csv.merchant</code>, <code>csv.branch</code>, <code>csv.fx_rate</code></td></tr>
+      <tr><td>TPT jobs</td><td><strong>1</strong> — <span class="job-name">demo_d_all</span></td></tr>
       <tr><td>Landing tables</td><td><strong>0</strong></td></tr>
       <tr><td>Target tables</td><td>3 — <code>DEMO_D.MERCHANT</code>, <code>DEMO_D.BRANCH</code>, <code>DEMO_D.FX_RATE</code></td></tr>
-      <tr><td>Merge routines</td><td><strong>0</strong> — the upsert happens inside the TPT job's own <code>APPLY</code> DML</td></tr>
+      <tr><td>Merge routines</td><td><strong>0</strong> — the upsert happens inside the job's own <code>APPLY</code> DML</td></tr>
     </tbody>
   </table>
 
-  <h2>How it works</h2>
+  <h2>The approach</h2>
 
   <!-- SVG topology diagram: 3 topics -> 1 job -> 3 targets directly, no landing stage -->
   <div class="diagram-wrap">
-    <svg viewBox="0 0 780 200" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+    <svg viewBox="0 0 780 210" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
       <defs>
         <marker id="arr-d" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="rgba(48,83,244,0.55)"/>
@@ -56,6 +68,7 @@
       </defs>
 
       <!-- 3 topics -->
+      <text x="68" y="14" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9.5" font-weight="600" letter-spacing="0.05em">FLAT CSV TOPICS</text>
       <rect x="8" y="20" width="120" height="26" rx="5" fill="rgba(48,83,244,0.12)" stroke="rgba(48,83,244,0.35)" stroke-width="1"/>
       <text x="68" y="37" text-anchor="middle" fill="#7d97fb" font-size="9.5">csv.merchant</text>
       <rect x="8" y="87" width="120" height="26" rx="5" fill="rgba(48,83,244,0.12)" stroke="rgba(48,83,244,0.35)" stroke-width="1"/>
@@ -73,12 +86,18 @@
       <text x="257" y="98" text-anchor="middle" fill="#7d97fb" font-size="10.5" font-weight="600">demo_d_all</text>
       <text x="257" y="111" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="8.5">1 job, 3 comma-joined APPLY clauses</text>
 
+      <!-- Gap marker where landing WOULD be -->
+      <rect x="352" y="82" width="122" height="36" rx="6" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1" stroke-dasharray="4,4"/>
+      <text x="413" y="98" text-anchor="middle" fill="rgba(255,255,255,0.28)" font-size="9" font-style="italic">no landing table</text>
+      <text x="413" y="110" text-anchor="middle" fill="rgba(255,255,255,0.28)" font-size="9" font-style="italic">no merge loop</text>
+
       <!-- Direct fan-out to targets - NO landing stage -->
-      <line x1="332" y1="90" x2="494" y2="33" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
-      <line x1="332" y1="100" x2="494" y2="100" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
-      <line x1="332" y1="110" x2="494" y2="167" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
+      <line x1="332" y1="94" x2="494" y2="33" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
+      <line x1="474" y1="100" x2="494" y2="100" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
+      <line x1="332" y1="106" x2="494" y2="167" stroke="rgba(4,206,126,0.30)" stroke-width="1.2" marker-end="url(#arr-d)"/>
 
       <!-- 3 targets, straight from the job -->
+      <text x="606" y="14" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9.5" font-weight="600" letter-spacing="0.05em">TARGET TABLES (DEMO_D)</text>
       <rect x="496" y="20" width="220" height="26" rx="5" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
       <text x="606" y="37" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="9.5">DEMO_D.MERCHANT</text>
       <rect x="496" y="87" width="220" height="26" rx="5" fill="rgba(4,206,126,0.08)" stroke="rgba(4,206,126,0.25)" stroke-width="1"/>
@@ -87,22 +106,27 @@
       <text x="606" y="171" text-anchor="middle" fill="rgba(255,255,255,0.75)" font-size="9.5">DEMO_D.FX_RATE</text>
       <rect x="712" y="20" width="4" height="160" rx="2" fill="#04CE7E"/>
 
-      <text x="257" y="150" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="8.5" font-style="italic">(compare to Scenario B: same fan-in shape, but B lands one JSON payload column first, then a separate merge loop parses/upserts every 2-5s)</text>
+      <text x="390" y="202" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9.5">Compare with Scenario B: same fan-in, but B lands a JSON payload first and a separate merge loop parses and upserts it every few seconds.</text>
     </svg>
   </div>
 
-  <h3>What the tbuild script looks like</h3>
   <p>
-    Verified live against a real Teradata target on 2026-07-14: one <code>APPLY</code> <em>statement</em> can hold multiple
-    comma-joined <code>APPLY</code> <em>clauses</em>, each with its own <code>TO OPERATOR</code>, all fed by one shared
-    <code>SELECT</code> at the end — the same grammar classic MultiLoad has used for decades to populate up to 5 target
-    tables from one job. Two non-obvious constraints found only by hitting them: consumer operators in this form must
-    declare <code>SCHEMA *</code> (deferred, not a named schema), and no modifiers (<code>WHERE</code>,
-    <code>IGNORE DUPLICATE ROWS</code>) are accepted between <code>TO OPERATOR (...)</code> and the next clause — so
-    per-table routing is done inside the DML text itself via a <code>CASE</code>-guarded <code>CAST</code> (so a
-    mismatched-type row's cast is never evaluated) and a guarded <code>SELECT ... WHERE</code> form of <code>INSERT</code>
-    (so a non-matching row just inserts nothing, instead of hitting a <code>NOT NULL</code> violation).
+    A single <code>APPLY</code> statement can hold multiple comma-joined <code>APPLY</code> clauses, each with
+    its own <code>TO OPERATOR</code>, all fed by one shared <code>SELECT</code> at the end. This is the same
+    grammar classic MultiLoad has used for decades to populate up to five target tables from one job — TPT
+    exposes it directly, and it is what lets one job write to three different tables here.
   </p>
+  <p>
+    Two design notes worth knowing before writing one of these. Consumer operators used in this form declare a
+    deferred <code>SCHEMA *</code> rather than a named schema. And because this restricted <code>APPLY</code>
+    grammar accepts no modifiers between <code>TO OPERATOR (...)</code> and the next clause, per-table routing
+    lives inside the DML itself: a <code>RECORD_TYPE</code> discriminator is injected as a literal in each
+    <code>SELECT</code>, the <code>UPDATE</code> guards its type-conversion with a <code>CASE</code> so a
+    non-matching row's <code>CAST</code> is never evaluated, and the <code>INSERT</code> uses a guarded
+    <code>SELECT ... WHERE</code> form so a non-matching row simply inserts nothing.
+  </p>
+
+  <h3>The job definition</h3>
   <div class="code-block">
     <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_all.tbuild (Scenario D, condensed)</div>
     <pre><span class="kw">DEFINE JOB</span> DEMO_D_LOAD_ALL
@@ -110,7 +134,8 @@
 (
   <span class="cm">-- MERCHANT_SCHEMA / BRANCH_SCHEMA / FX_RATE_SCHEMA: one per topic, narrow, typed</span>
   <span class="cm">-- KAFKA_MERCHANT / KAFKA_BRANCH / KAFKA_FX_RATE: one DATACONNECTOR PRODUCER per topic</span>
-  <span class="cm">-- STREAM_MERCHANT / STREAM_BRANCH / STREAM_FX_RATE: SCHEMA * (deferred), TargetTable = the real table</span>
+  <span class="cm">-- STREAM_MERCHANT / STREAM_BRANCH / STREAM_FX_RATE: SCHEMA * (deferred),</span>
+  <span class="cm">--   TargetTable = the real target table, not a landing table</span>
 
   <span class="kw">STEP</span> MAIN_STEP (
     <span class="kw">APPLY</span> (
@@ -126,6 +151,7 @@
     <span class="kw">APPLY</span> ( <span class="cm">/* same shape, guarded on 'branch' */</span> ) <span class="kw">TO OPERATOR</span> (STREAM_BRANCH)
     ,
     <span class="kw">APPLY</span> ( <span class="cm">/* same shape, guarded on 'fx_rate' */</span> ) <span class="kw">TO OPERATOR</span> (STREAM_FX_RATE)
+    <span class="cm">-- One shared SELECT feeds all three APPLY clauses:</span>
     <span class="kw">SELECT</span> <span class="st">'merchant'</span> <span class="kw">AS</span> RECORD_TYPE, ... <span class="kw">FROM OPERATOR</span> (KAFKA_MERCHANT)
     <span class="op">UNION ALL</span> <span class="kw">SELECT</span> <span class="st">'branch'</span> <span class="kw">AS</span> RECORD_TYPE, ... <span class="kw">FROM OPERATOR</span> (KAFKA_BRANCH)
     <span class="op">UNION ALL</span> <span class="kw">SELECT</span> <span class="st">'fx_rate'</span> <span class="kw">AS</span> RECORD_TYPE, ... <span class="kw">FROM OPERATOR</span> (KAFKA_FX_RATE);
@@ -133,29 +159,102 @@
 );
 <span class="cm">-- tbuild -f load_all.tbuild -j demo_d_all -l 5 -z 10</span></pre>
   </div>
-
-  <h2>What to expect on the dashboard</h2>
   <p>
-    The <strong>Scenario D</strong> card shows <code>1/1 jobs running</code> and three target tables with live row counts —
-    but its <strong>backlog column always reads 0</strong>, on purpose: there's no landing table for anything to back up in.
-    Watch the latency panel next to Scenario B's during a burst — D's latency reflects only the TPT flush interval, with no
-    added wait for a periodic merge-loop cycle the way B's does.
+    The <code>UPDATE</code>'s <code>CAST(:EVENT_TS AS TIMESTAMP(6)) &gt; source_updated_ts</code> guard also makes
+    the upsert order-safe: a stale event arriving after a newer one is rejected rather than overwriting current
+    data.
   </p>
-  <div class="callout info">
-    <p><strong>What this trades away:</strong> Scenario B's landing table doubles as a raw-payload audit trail — a
-    replay-from-landing safety net if a merge routine ever needs correcting. Scenario D has no equivalent staging tier, so
-    that audit/replay window doesn't exist here. Worth surfacing explicitly if a customer's compliance story leans on
-    staged raw-event retention — this is a real tradeoff, not a strictly-better replacement for B.</p>
+
+  <h2>Why it works</h2>
+  <p>
+    The landing table in Scenarios A, B and C is not there for its own sake — it exists because a CDC envelope
+    needs somewhere to sit while its structure is unpicked. Remove that requirement and the tier has no job to
+    do. A flat CSV row already has one column per field and one row per business event, which is exactly what a
+    TPT <code>SCHEMA</code> describes, so the operator can bind those fields straight into target-table DML.
+  </p>
+  <p>
+    This also removes the largest latency term in the other scenarios. For A, B and C, end-to-end latency is
+    dominated by the merge loop's polling interval, not by TPT. Scenario D has no merge loop, so its latency is
+    the TPT flush interval alone — which is why watching D's line against B's on the latency chart is the
+    comparison worth making.
+  </p>
+
+  <h2>Trade-offs</h2>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li><strong>No staging tier at all</strong> — no landing tables, no merge routines, no staging storage</li>
+        <li><strong>Lowest latency of the four</strong> — TPT flush time, with no merge cycle to wait for</li>
+        <li>Fewest moving parts and fewest components to own</li>
+        <li>Nothing downstream to schedule, monitor or keep running</li>
+        <li>Upsert is order-safe by construction, via the event-timestamp guard</li>
+        <li>One job serves many tables, as in Scenario B</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li><strong>Requires a flat, typed source</strong> — not applicable to a CDC change envelope</li>
+        <li><strong>No staged raw payload</strong>, so no replay-from-landing safety net</li>
+        <li>Shared fate across the tables in the job, exactly as in Scenario B</li>
+        <li>Routing logic lives inside the job's DML, so schema changes mean editing the job</li>
+        <li>The upsert form writes duplicate-key rejects to the operator's error table by design — expected, per-row, and never job-fatal, but it needs routine housekeeping</li>
+        <li>A single job's target-table count is bounded — very wide estates need several jobs</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout warn">
+    <p><strong>The audit trade-off, stated plainly:</strong> Scenario B's landing table doubles as a raw-payload
+    audit trail and a replay safety net if merge logic ever needs correcting. Scenario D has no equivalent
+    staging tier, so that window does not exist. If a compliance story leans on retaining staged raw events,
+    that is a genuine reason to prefer B — this is a trade, not a strict improvement.</p>
   </div>
 
-  <h2>Why this matters beyond 3 reference tables</h2>
+  <h2>What the dashboard shows</h2>
   <p>
-    At 500-table scale, plenty of source systems genuinely produce flat, typed export rows — batch extracts, message-queue
-    feeds already normalized upstream, application event streams designed around a fixed schema — rather than a CDC tool's
-    semi-structured change envelope. For exactly those sources, Scenario D is the pattern: skip the landing-and-shred tier
-    entirely and let TPT's own multi-table <code>APPLY</code> mechanism do the upsert, in the same single consolidated job
-    Scenario B already argues for. It's not a replacement for B's CDC pattern — it's the same "consolidate ingest" thesis,
-    one step further, for the subset of sources where the data shape allows it.
+    The Scenario D card shows <code>1/1 jobs running</code> and three target tables with live row counts. Its
+    <strong>backlog column always reads 0</strong>, by design — there is no landing table for anything to back up
+    in. That zero is the point being made, not a missing metric.
+  </p>
+  <div class="footprint">
+    <div class="stat"><div class="val">1</div><div class="lbl">TPT process</div></div>
+    <div class="stat"><div class="val">6</div><div class="lbl">Teradata sessions</div></div>
+    <div class="stat"><div class="val">0</div><div class="lbl">landing tables</div></div>
+    <div class="stat"><div class="val">0</div><div class="lbl">merge routines</div></div>
+  </div>
+  <p>
+    Watch D's latency against B's during a burst: D's reflects only the TPT flush interval, with no added wait
+    for a periodic merge cycle.
+  </p>
+
+  <h2>Where this pattern fits</h2>
+  <div class="fit">
+    <div class="side use">
+      <div class="side-label">Choose it when</div>
+      <ul>
+        <li>Sources emit flat, typed rows — batch extracts, pre-normalised queue feeds, fixed-schema event streams</li>
+        <li>Latency matters and a merge cycle is the term you want to remove</li>
+        <li>Reference and dimension data with a natural key and an event timestamp</li>
+        <li>Minimising the number of components is a first-order goal</li>
+      </ul>
+    </div>
+    <div class="side skip">
+      <div class="side-label">Reconsider when</div>
+      <ul>
+        <li>The source is a CDC change envelope — use <a href="/static/pages/scenario-b.html">Scenario B</a></li>
+        <li>Staged raw events are needed for audit, replay or reprocessing</li>
+        <li>Target schemas change frequently, since routing lives in the job's DML</li>
+        <li>Source rows need heavy transformation before they are fit to land</li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    At full scale, a meaningful share of most 500-table estates is genuinely flat rather than CDC-derived —
+    batch extracts, message-queue feeds already normalised upstream, application event streams built around a
+    fixed schema. For that share, Scenario D is the pattern: skip the staging tier and let TPT's multi-table
+    <code>APPLY</code> do the upsert, inside the same single consolidated job Scenario B already argues for.
+    Most real estates use both. See <a href="/static/pages/scaling.html">Scaling to 500</a>.
   </p>
 
   <div class="pagenav">

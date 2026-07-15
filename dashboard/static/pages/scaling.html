@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Scaling to 500 Topics — Kafka CDC → TPT → Teradata Demo</title>
+<title>Scaling to 500 — Choosing the Right Pattern</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -22,127 +22,252 @@
 
   <div class="eyebrow">Production architecture</div>
   <h1>From 5 tables to 500</h1>
-  <p class="subtitle">The numbers behind "500 independent jobs doesn't work" — and what to build instead.</p>
+  <p class="subtitle">The mechanisms don't change with scale. What changes is how much you end up operating — and that is a design choice, not a consequence.</p>
 
-  <h2>The binding constraint: Teradata session ceilings</h2>
+  <h2>What actually scales</h2>
   <p>
-    Every TPT job holds open a set of Teradata sessions for its whole lifetime. The limit on how many jobs can run
-    concurrently isn't about Kafka, CPU, or network — it's about how many sessions the target system can host at once.
+    Everything on the live dashboard is the same mechanism that runs at 500 tables: consumer groups, producer
+    operators, landing tables, idempotent merges, TPT jobs. Nothing new appears between 5 and 500. The rows get
+    more numerous, and Teradata absorbs rows well — that is what it is for.
   </p>
-  <div class="callout warn">
-    <p><strong>A number worth being precise about:</strong> Teradata's <em>maximum nodes per system configuration</em> is
-    1,024 — a completely different thing from a session limit, and unrelated to job concurrency. Earlier internal material
-    on this topic conflated the two and quoted "1,024 global sessions" as the ceiling; that was traced back to Appendix B
-    of the <em>Database Administration</em> manual (R20.00) and corrected. The real session ceilings are below.</p>
-  </div>
-  <table>
-    <thead><tr><th>Limit</th><th>Value</th></tr></thead>
-    <tbody>
-      <tr><td>Max sessions per PE</td><td><strong>120</strong></td></tr>
-      <tr><td>Max sessions per gateway vproc</td><td><strong>1,200</strong> certified maximum, <strong>600</strong> default, tunable</td></tr>
-    </tbody>
-  </table>
   <p>
-    There is no single global session number — total system-wide session capacity is a function of
-    <strong>node count &times; per-gateway limit</strong> (one gateway vproc per node by default), not a fixed constant.
+    What does change is <strong>the size of the estate you operate</strong>. And that depends entirely on one
+    decision: whether the number of ingestion jobs grows with the number of tables. In Scenario A it does, exactly
+    one-for-one. In Scenarios B and C it does not.
   </p>
 
-  <h2>What that means for "500 independent jobs"</h2>
-  <p>
-    500 independent TPT jobs at roughly 4 sessions each need about <strong>2,000 sessions</strong>. Whether that fits
-    depends on the specific system's gateway/PE topology — but across realistic system sizes, only a fraction of 500 jobs
-    can actually run at once. The rest queue.
-  </p>
-  <table>
-    <thead><tr><th>System</th><th>AMP count</th><th>Max concurrent jobs</th><th>Queue depth</th></tr></thead>
-    <tbody>
-      <tr><td>POC</td><td>4</td><td>192</td><td>308</td></tr>
-      <tr><td>Small Prod</td><td>8</td><td>96</td><td>404</td></tr>
-      <tr><td>Medium Prod</td><td>20</td><td>38</td><td>462</td></tr>
-      <tr><td>Large Prod</td><td>120</td><td>8</td><td>492</td></tr>
-    </tbody>
-  </table>
-  <p>
-    Counter-intuitively, <strong>larger systems run fewer concurrent independent jobs</strong>, not more — a 20-AMP
-    production system runs 38 jobs concurrently while 462 queue, with average queue waits ranging from <strong>10 minutes
-    to 31 hours</strong>. That's not real-time ingestion; it's serialized batch wearing a streaming costume. This is the
-    concrete failure mode Scenario A is standing in for at 5-table scale.
-  </p>
+  <!-- SVG: jobs vs tables cost curve -->
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+      <!-- Title -->
+      <text x="60" y="24" fill="rgba(255,255,255,0.55)" font-size="11" font-weight="600" letter-spacing="0.05em">JOBS TO OPERATE vs TABLES INGESTED</text>
 
-  <h2>The three production patterns</h2>
-  <p>Each demo scenario is a small, runnable version of one of these three patterns:</p>
-  <table>
-    <thead><tr><th>Pattern</th><th>Demo stand-in</th><th>Jobs at 500 tables</th><th>Complexity</th><th>Throughput</th><th>Latency</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>CDC + 1 TPT job</strong><br>consolidate everything</td>
-        <td><span class="tag tag-b">B</span></td>
-        <td>1</td>
-        <td>LOW</td>
-        <td>8,000&ndash;40,000 rows/sec</td>
-        <td>100&ndash;500ms</td>
-      </tr>
-      <tr>
-        <td><strong>Domain segmentation</strong><br>independent topics, grouped by business domain</td>
-        <td><em>&mdash; not run in this demo (see below)</em></td>
-        <td>3&ndash;5</td>
-        <td>MEDIUM</td>
-        <td>40,000&ndash;80,000 rows/sec</td>
-        <td>200ms&ndash;5s</td>
-      </tr>
-      <tr>
-        <td><strong>Tiered</strong><br>hot tables isolated, warm/cold consolidated</td>
-        <td><span class="tag tag-c">C</span></td>
-        <td>~22 (20 hot + ~2 consolidated)</td>
-        <td>MEDIUM&ndash;HIGH</td>
-        <td>20,000&ndash;50,000 rows/sec</td>
-        <td>tiered: hot low, cold high</td>
-      </tr>
-      <tr>
-        <td><strong>500 independent jobs</strong><br>the broken pattern</td>
-        <td><span class="tag tag-a">A</span></td>
-        <td>500 (only 8&ndash;192 run concurrently)</td>
-        <td>EXTREME</td>
-        <td>8,000&ndash;50,000 rows/sec, <em>queued</em></td>
-        <td>10 min&ndash;31 hrs</td>
-      </tr>
-    </tbody>
-  </table>
-  <p class="subtitle" style="margin-top:-4px">
-    "Domain segmentation" applies when the 500 sources are genuinely independent Kafka topics (microservices publishing
-    directly), rather than CDC off database tables — not this demo's situation, but worth naming since a customer may ask
-    about it. This demo's source is a single database, so CDC-based consolidation (Scenario B) and tiering (Scenario C)
-    are the two patterns that actually apply.
-  </p>
+      <!-- Grid lines -->
+      <line x1="60" y1="250" x2="680" y2="250" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+      <line x1="60" y1="40"  x2="60"  y2="250" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+      <line x1="60" y1="208" x2="680" y2="208" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <line x1="60" y1="166" x2="680" y2="166" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <line x1="60" y1="124" x2="680" y2="124" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <line x1="60" y1="82"  x2="680" y2="82"  stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <line x1="60" y1="40"  x2="680" y2="40"  stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
 
-  <h2>Mapping the demo onto 500 tables</h2>
-  <div class="card">
-    <p><span class="tag tag-a">A</span> &mdash; extrapolates to 500 independent jobs. Not viable on any but the smallest
-    systems; included so the room feels why "one job per table" is the natural first instinct before the numbers above
-    undercut it.</p>
-  </div>
-  <div class="card">
-    <p><span class="tag tag-b">B</span> &mdash; extrapolates to the Tier 1 / best-practice production design: 10&ndash;30
-    Debezium connectors grouped by domain, consolidated into 1&ndash;3 Kafka topics, 1 TPT job, 1 landing table, one
-    fan-out merge. Independently corroborated at real scale: a logistics customer processing 500M messages/day across 17
-    sources at 6,200 rows/sec with 0.2% additional CPU; a global automotive manufacturer at 8,000 msg/sec (500M msg/day)
-    via MQ; a telco reference handling 1 billion messages/hour.</p>
-  </div>
-  <div class="card">
-    <p><span class="tag tag-c">C</span> &mdash; extrapolates to the tiered pattern: the 10&ndash;20 tables that would
-    actually cause business impact if delayed a few seconds (fraud/risk signals, real-time authorization, inventory
-    reservations — identified by asking "which 10&ndash;20 would hurt if they lagged 5 seconds?") get dedicated per-table
-    jobs. The remaining ~480 warm/cold tables share one or a handful of consolidated jobs, each on the appropriate TASM
-    tier. Net: roughly <strong>22 concurrent jobs instead of 500</strong>, comfortably inside any system's session
-    ceiling, while still giving genuine real-time isolation where it's actually needed.</p>
+      <!-- Y ticks -->
+      <text x="52" y="254" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">0</text>
+      <text x="52" y="212" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">100</text>
+      <text x="52" y="170" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">200</text>
+      <text x="52" y="128" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">300</text>
+      <text x="52" y="86"  text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">400</text>
+      <text x="52" y="44"  text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="9">500</text>
+      <text x="20" y="150" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" transform="rotate(-90,20,150)">TPT JOBS</text>
+
+      <!-- X ticks -->
+      <text x="60"  y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">0</text>
+      <text x="196" y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">100</text>
+      <text x="332" y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">200</text>
+      <text x="468" y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">300</text>
+      <text x="604" y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">400</text>
+      <text x="680" y="268" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">500</text>
+      <text x="370" y="288" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600">SOURCE TABLES INGESTED</text>
+
+      <!-- Scenario A: linear -->
+      <line x1="60" y1="250" x2="680" y2="40" stroke="#04CE7E" stroke-width="2.5"/>
+      <circle cx="680" cy="40" r="3.5" fill="#04CE7E"/>
+      <text x="692" y="38" fill="#04CE7E" font-size="10" font-weight="600">A — 500 jobs</text>
+      <text x="692" y="50" fill="rgba(255,255,255,0.40)" font-size="8.5">one per table</text>
+
+      <!-- Scenario C: ~22, near flat -->
+      <line x1="60" y1="250" x2="680" y2="241" stroke="#ffaa66" stroke-width="2.5"/>
+      <circle cx="680" cy="241" r="3.5" fill="#ffaa66"/>
+      <text x="692" y="238" fill="#ffaa66" font-size="10" font-weight="600">C — ~22 jobs</text>
+
+      <!-- Scenario B: 1, flat -->
+      <line x1="60" y1="250" x2="680" y2="250" stroke="#C4B7F1" stroke-width="2.5"/>
+      <circle cx="680" cy="250" r="3.5" fill="#C4B7F1"/>
+      <text x="692" y="258" fill="#C4B7F1" font-size="10" font-weight="600">B — 1 job</text>
+
+      <!-- Annotation on A -->
+      <text x="330" y="140" fill="rgba(255,255,255,0.50)" font-size="9.5" font-style="italic">every table adds a job</text>
+      <line x1="326" y1="136" x2="290" y2="152" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+
+      <!-- Annotation on B/C -->
+      <text x="300" y="230" fill="rgba(255,255,255,0.50)" font-size="9.5" font-style="italic">every table adds rows, not jobs</text>
+      <line x1="296" y1="234" x2="270" y2="246" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+    </svg>
   </div>
 
-  <h2>The one-sentence close</h2>
   <div class="callout">
-    <p>Everything you just watched on the dashboard — job counts, landing latency, the isolation-vs-consolidation
-    tradeoff on kill/restart — is the same mechanism that would run at 500 tables. The only thing that changes between 5
-    and 500 is which of these three patterns makes sense for your specific tables' latency requirements, not the
-    underlying architecture.</p>
+    <p><strong>The whole argument in one line:</strong> with Scenario A, every table you add costs you a job.
+    With Scenario B, every table you add costs you a few rows. Both pipelines move the same data — but only one
+    of them makes growth free.</p>
+  </div>
+
+  <h2>The cost model at 500 tables</h2>
+  <p>
+    The demo runs 5 tables. Each pattern's per-table cost is directly observable on the dashboard right now, so
+    extrapolating is arithmetic rather than speculation.
+  </p>
+  <table>
+    <thead>
+      <tr><th>What you operate</th><th><span class="tag tag-a">A</span> job per table</th><th><span class="tag tag-b">B</span> consolidated</th><th><span class="tag tag-c">C</span> tiered</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>TPT jobs</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Landing tables</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Merge routines</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Deployment artefacts</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Monitors &amp; alert rules</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Runbook entries</td><td>500</td><td><strong>1</strong></td><td>~22</td></tr>
+      <tr><td>Effort to add one table</td><td>new job + deploy</td><td><strong>edit one file</strong></td><td>edit one file, or a new job if hot</td></tr>
+      <tr><td>Effort of a connection change</td><td>500 edits</td><td><strong>1 edit</strong></td><td>~22 edits</td></tr>
+    </tbody>
+  </table>
+  <p>
+    None of these rows are about data volume. They are the cost of the plumbing itself — and in a 500-table
+    estate that cost is what determines whether the platform is staffable. This is the difference the live
+    footprint readout makes concrete: <strong>Scenario A shows 5 processes and 10 sessions where Scenario B shows
+    1 and 2</strong>, for the same five tables, the same live data and the same moment in time. That ratio holds
+    as the estate grows.
+  </p>
+
+  <h2>The case for each pattern</h2>
+
+  <h3><span class="tag tag-a">A</span> — Job per table</h3>
+  <p>
+    <strong>The case for it:</strong> it is the only pattern with complete failure isolation. Every table can be
+    tuned, scheduled, prioritised, charged and restarted independently, and the job topology mirrors the schema
+    so anyone can reason about it immediately. For a small, stable estate — roughly 20 tables or fewer — this
+    costs almost nothing and buys real operational clarity. It is a legitimate design, not a strawman, which is
+    why this demo runs it for real.
+  </p>
+  <p>
+    <strong>The case against it at 500:</strong> every artefact multiplies by table count. 500 jobs, 500 landing
+    tables, 500 merges, 500 alert rules, 500 runbook entries, and 500 places to touch when a password or a
+    hostname changes. The pipeline's dominant cost stops being the data and becomes the pipeline. Teams that
+    choose this pattern at scale generally end up rebuilding it — usually as Scenario C — once the operational
+    load lands on them.
+  </p>
+  <p><strong>Verdict:</strong> right for small estates, expensive for large ones.</p>
+
+  <h3><span class="tag tag-b">B</span> — One consolidated job</h3>
+  <p>
+    <strong>The case for it:</strong> job count decouples from table count entirely. One job, one landing table,
+    one merge, one thing to monitor — at 5 tables or 500. Adding a table is a job-definition edit rather than a
+    deployment. The landing table doubles as a raw-payload audit and replay trail. This shape runs comfortably
+    at 8,000&ndash;40,000 rows/sec with 100&ndash;500ms loader latency, and it is corroborated in production: a
+    logistics operator at 500M messages/day across 17 sources, sustaining 6,200 rows/sec for roughly 0.2%
+    additional CPU; a global automotive manufacturer at 8,000 msg/sec; a telco reference at a billion messages
+    an hour.
+  </p>
+  <p>
+    <strong>The case against it:</strong> shared fate is real. One job means one failure domain, one priority
+    and one flush cadence for every table it serves. There is no per-table SLA, so a latency-critical table
+    cannot be favoured. And the merge cadence — not TPT — becomes the dominant latency term, which the merge
+    speed toggle demonstrates live.
+  </p>
+  <p><strong>Verdict:</strong> the default recommendation for a large CDC estate with a uniform SLA.</p>
+
+  <h3><span class="tag tag-c">C</span> — Tiered</h3>
+  <p>
+    <strong>The case for it:</strong> it removes the false choice. The 10&ndash;20 tables that carry a genuine
+    real-time requirement get dedicated jobs with their own consumer groups, merge cadence and workload
+    priority. The remaining several hundred share one or a handful of consolidated jobs. That lands at roughly
+    <strong>20&ndash;25 jobs instead of 500</strong> — a 95% reduction in operated surface — while still
+    delivering true isolation exactly where the business needs it. It is also composed entirely of patterns
+    already proven by A and B, so there is nothing novel to validate.
+  </p>
+  <p>
+    <strong>The case against it:</strong> it is two patterns to build, document and operate rather than one, and
+    it depends on an honest, maintained answer to "which tables are actually hot?" — a question that is
+    organisational as much as technical. Tier membership drifts, and if the hot list keeps growing you converge
+    back on Scenario A.
+  </p>
+  <p><strong>Verdict:</strong> the right answer whenever SLAs genuinely differ, or isolation is mandated for named tables.</p>
+
+  <h3><span class="tag tag-d">D</span> — Direct multi-table load</h3>
+  <p>
+    <strong>The case for it:</strong> where the source is already flat and typed, the staging tier has no work
+    to do and can be removed outright. No landing tables, no merge routines, no scheduled downstream component,
+    and the lowest latency of the four because there is no merge cycle to wait for. Most 500-table estates have
+    a meaningful flat share — batch extracts, pre-normalised queue feeds, fixed-schema event streams — and for
+    that share this is simply less to build.
+  </p>
+  <p>
+    <strong>The case against it:</strong> it does not apply to CDC change envelopes, which is what most of a
+    500-table estate typically is. It gives up the staged raw payload, so there is no replay-from-landing safety
+    net. And a single job's target-table count is bounded, so a wide flat estate needs several jobs, each
+    covering a group of tables — still far fewer than one per table, but not a single job for all of them.
+  </p>
+  <p><strong>Verdict:</strong> the right answer for the flat subset of the estate, alongside B or C for the CDC remainder.</p>
+
+  <h2>Choosing by workload</h2>
+  <table>
+    <thead><tr><th>Workload</th><th>Pattern</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Hundreds of CDC tables, one or a few source databases, uniform SLA</td>
+        <td><span class="tag tag-b">B</span></td>
+        <td>Nothing needs isolating, so nothing should pay for it. Job count stays at one as the estate grows.</td>
+      </tr>
+      <tr>
+        <td>Hundreds of CDC tables, but 10&ndash;20 carry a real-time SLA</td>
+        <td><span class="tag tag-c">C</span></td>
+        <td>Buy isolation only for the tables whose latency is worth money. ~22 jobs, not 500.</td>
+      </tr>
+      <tr>
+        <td>Regulator or auditor mandates isolated pipelines for named tables</td>
+        <td><span class="tag tag-c">C</span></td>
+        <td>Satisfies the mandate precisely, without extending it to tables it never covered.</td>
+      </tr>
+      <tr>
+        <td>Small, stable estate — roughly 20 tables or fewer</td>
+        <td><span class="tag tag-a">A</span></td>
+        <td>Isolation is nearly free at this size, and the mental model is the simplest available.</td>
+      </tr>
+      <tr>
+        <td>Sources already publishing flat, typed rows to Kafka</td>
+        <td><span class="tag tag-d">D</span></td>
+        <td>The staging tier has no job to do. Remove it and the latency and the component count both drop.</td>
+      </tr>
+      <tr>
+        <td>Very high throughput across genuinely independent event streams</td>
+        <td><span class="tag tag-c">C</span> by domain</td>
+        <td>Segment by business domain rather than by table — 3&ndash;5 jobs, each sized to its domain.</td>
+      </tr>
+      <tr>
+        <td>A mixed estate — most real customers</td>
+        <td><span class="tag tag-c">C</span> + <span class="tag tag-d">D</span></td>
+        <td>Tier the CDC tables; load the flat feeds direct. The two compose cleanly.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>The recommended shape at 500 tables</h2>
+  <div class="card">
+    <p><strong>Start from consolidation and add isolation only where it is earned.</strong> For a typical
+    500-table CDC estate that means:</p>
+    <ul>
+      <li><strong>10&ndash;30 CDC connectors</strong> grouped by business domain, consolidating into
+          <strong>1&ndash;3 Kafka topics</strong> — topic count does not need to mirror table count either</li>
+      <li><strong>1 consolidated TPT job</strong> for the warm and cold tail, with one landing table and one
+          fan-out merge (<a href="/static/pages/scenario-b.html">Scenario B</a>)</li>
+      <li><strong>Dedicated jobs for the 10&ndash;20 tables</strong> with a genuine real-time SLA, each on its
+          own workload tier (<a href="/static/pages/scenario-c.html">Scenario C</a>)</li>
+      <li><strong>Direct multi-table loads</strong> for whatever share of the estate arrives already flat
+          (<a href="/static/pages/scenario-d.html">Scenario D</a>)</li>
+      <li><strong>Pilot with 10&ndash;20 representative tables first</strong> — validate latency, monitoring and
+          workload management, then scale out. The architecture does not change between the pilot and the full
+          estate, which is the point of choosing it this way</li>
+    </ul>
+    <p>Net: roughly <strong>20&ndash;25 jobs to operate rather than 500</strong>, with real-time isolation
+    exactly where the business requires it and consolidated economics everywhere else.</p>
+  </div>
+
+  <h2>The close</h2>
+  <div class="callout">
+    <p>Everything on the dashboard — job counts, resource footprint, landing latency, the isolation trade-off on
+    stop and restart — is the same mechanism that runs at 500 tables. The only thing that changes between 5 and
+    500 is which pattern you choose for which tables. Choose well and the estate grows without the operating
+    cost growing with it.</p>
   </div>
 
   <div class="pagenav">

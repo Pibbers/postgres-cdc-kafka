@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Scenario B — Kafka CDC → TPT → Teradata Demo</title>
+<title>Scenario B — One Consolidated Job</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -21,36 +21,47 @@
 <div class="page">
 
   <div class="eyebrow">Scenario B</div>
-  <h1>5 topics, 1 job, fan-out at merge time</h1>
-  <p class="subtitle">The recommended production pattern — and what "500 tables" would actually look like mechanically.</p>
+  <h1>One job, every topic, fan-out at merge time</h1>
+  <p class="subtitle">The recommended pattern for a large CDC estate — because the job count stops tracking the table count.</p>
 
-  <div class="callout">
-    <p><strong>The pitch this scenario proves:</strong> one consolidated job can read every topic and land every table — and it handles 500 tables exactly the same way it handles 5, because the job count doesn't grow with table count.</p>
-  </div>
+  <h2>What this scenario covers</h2>
+  <p>
+    Scenario B reads exactly the same five topics as Scenario A, at the same moment, from the same Kafka cluster
+    — through <strong>one</strong> TPT job instead of five. Every topic lands in a single shared landing table,
+    and one fan-out merge routes each row to its target.
+  </p>
+  <p>
+    The property that matters is not that five became one. It is that <strong>adding a sixth topic adds a few
+    lines to a job definition rather than a sixth job</strong>. The same shape that serves 5 tables serves 500,
+    with the same single process, the same single landing table and the same single merge.
+  </p>
 
   <h2>Shape</h2>
   <table>
     <tbody>
-      <tr><td>Kafka topics</td><td>5 (same topics as Scenario A — a separate consumer group, <code>tpt.demo_b</code>)</td></tr>
+      <tr><td>Kafka topics</td><td>5 — the same topics as Scenario A, read through a separate consumer group, <code>tpt.demo_b</code></td></tr>
       <tr><td>TPT jobs</td><td><strong>1</strong> — <span class="job-name">demo_b_all</span></td></tr>
       <tr><td>Landing table</td><td><strong>1</strong> — <code>DEMO_B.CDC_LANDING</code>, shared by all 5 tables</td></tr>
-      <tr><td>Target tables</td><td>5 — <code>DEMO_B.CUSTOMER</code>, <code>"ACCOUNT"</code>, <code>CARD</code>, <code>PAYMENT</code>, <code>"TRANSACTION"</code></td></tr>
-      <tr><td>Merge routines</td><td><strong>1</strong> — a single fan-out merge that routes each landed row to its target table</td></tr>
+      <tr><td>Target tables</td><td>5 — under <code>DEMO_B</code>, identical DDL to Scenario A</td></tr>
+      <tr><td>Merge routines</td><td><strong>1</strong> — a single fan-out merge routing each landed row to its target</td></tr>
     </tbody>
   </table>
 
-  <h2>How it works</h2>
+  <h2>The approach</h2>
   <p>
-    The Kafka Access Module doesn't support subscribing one reader instance to multiple topics at once, so the job instead
-    declares <strong>5 separate <code>DATACONNECTOR PRODUCER</code> operators</strong> — one per topic — and combines all 5
-    with <code>UNION ALL</code> feeding a single, shared <code>STREAM</code> operator. All 5 readers are coordinated as one
-    Kafka consumer group. This is the same mechanism TPT normally uses to parallelize reads across partitions of one topic,
-    applied instead across 5 different topics.
+    The Kafka Access Module subscribes one reader to one topic, so the job declares <strong>five separate
+    <code>DATACONNECTOR PRODUCER</code> operators</strong> — one per topic — and combines all five with
+    <code>UNION ALL</code> into a single data stream feeding one shared <code>STREAM</code> operator. All five
+    readers are coordinated as one Kafka consumer group.
+  </p>
+  <p>
+    This is the same mechanism TPT uses to parallelise reads across the partitions of a single topic, applied
+    instead across five different topics. It is standard TPT grammar, not a workaround.
   </p>
 
   <!-- SVG topology diagram: fan-in then fan-out -->
   <div class="diagram-wrap">
-    <svg viewBox="0 0 780 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+    <svg viewBox="0 0 780 240" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
       <defs>
         <marker id="arr-b" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="rgba(196,183,241,0.50)"/>
@@ -69,6 +80,7 @@
       <text x="68" y="132" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.payment</text>
       <rect x="8" y="146" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
       <text x="68" y="162" text-anchor="middle" fill="#C4B7F1" font-size="9.5">cdc.public.transaction</text>
+      <text x="68" y="188" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="9.5" font-style="italic">…topic 500</text>
 
       <!-- Fan-in lines to UNION ALL -->
       <line x1="128" y1="38" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
@@ -76,6 +88,7 @@
       <line x1="128" y1="98" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
       <line x1="128" y1="128" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
       <line x1="128" y1="158" x2="196" y2="100" stroke="rgba(196,183,241,0.30)" stroke-width="1.2"/>
+      <line x1="128" y1="184" x2="196" y2="100" stroke="rgba(196,183,241,0.16)" stroke-width="1.2" stroke-dasharray="3,3"/>
 
       <!-- UNION ALL / single job box -->
       <rect x="196" y="74" width="130" height="52" rx="8" fill="rgba(196,183,241,0.12)" stroke="rgba(196,183,241,0.35)" stroke-width="1.5"/>
@@ -90,7 +103,7 @@
       <rect x="372" y="74" width="128" height="52" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
       <text x="436" y="95" text-anchor="middle" fill="rgba(255,255,255,0.80)" font-size="10" font-weight="600">CDC_LANDING</text>
       <text x="436" y="110" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5">DEMO_B.CDC_LANDING</text>
-      <text x="436" y="123" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="9">all 5 tables, 1 row stream</text>
+      <text x="436" y="123" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="9">all tables, 1 row stream</text>
 
       <!-- Fan-out label -->
       <text x="516" y="96" text-anchor="start" fill="rgba(255,255,255,0.20)" font-size="9">fan-out</text>
@@ -118,19 +131,22 @@
 
       <!-- Teradata bar -->
       <rect x="764" y="26" width="4" height="144" rx="2" fill="#FF5F02"/>
+
+      <text x="390" y="222" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9.5">Fan-in at read time, fan-out at merge time. The middle stays one process however many topics arrive.</text>
     </svg>
   </div>
 
-  <h3>What the tbuild script looks like</h3>
+  <h3>The job definition</h3>
   <div class="code-block">
-    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_all.tbuild (Scenario B)</div>
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_all.tbuild (Scenario B, abridged)</div>
     <pre><span class="cm">-- One job: 5 DATACONNECTOR PRODUCER operators UNION ALL'd into 1 STREAM</span>
 <span class="kw">DEFINE JOB</span> DEMO_B_LOAD_ALL
 <span class="kw">DESCRIPTION</span> <span class="st">'Scenario B: 5 topics -> 1 TPT job -> 1 landing table -> fan-out merge'</span>
 (
   <span class="kw">DEFINE SCHEMA</span> CDC_RAW_SCHEMA ( <span class="ty">PAYLOAD VARCHAR</span>(16000) );
 
-  <span class="cm">-- One DATACONNECTOR PRODUCER per topic (Kafka Access Module instance each)</span>
+  <span class="cm">-- One DATACONNECTOR PRODUCER per topic; each attaches its own Kafka</span>
+  <span class="cm">-- Access Module instance. Adding a topic = adding one of these blocks.</span>
   <span class="kw">DEFINE OPERATOR</span> KAFKA_CUSTOMER <span class="ty">TYPE DATACONNECTOR PRODUCER</span> <span class="kw">SCHEMA</span> CDC_RAW_SCHEMA
   <span class="kw">ATTRIBUTES</span> ( <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T cdc.public.customer -B $(KAFKA_BOOTSTRAP)
                                          -P * -X group.id=$(KAFKA_GROUP_ID)'</span> );
@@ -149,7 +165,7 @@
   <span class="kw">STEP</span> MAIN_STEP (
     <span class="kw">APPLY</span> ( <span class="st">'INSERT INTO $(TD_DATABASE).CDC_LANDING (PAYLOAD) VALUES (:PAYLOAD);'</span> )
     <span class="kw">TO OPERATOR</span> (TD_INSERTER)
-    <span class="cm">-- All 5 readers combined as a single row stream:</span>
+    <span class="cm">-- All 5 readers combined into a single row stream:</span>
     <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_CUSTOMER)
     <span class="op">UNION ALL</span>
     <span class="kw">SELECT</span> * <span class="kw">FROM OPERATOR</span> (KAFKA_ACCOUNT)
@@ -163,42 +179,123 @@
 );
 
 <span class="cm">-- Run with: tbuild -f load_all.tbuild -j demo_b_all -l 5 -z 10</span>
-<span class="cm">-- 1 file = 1 process = 1 window. At 500 tables: still 1 job.</span></pre>
+<span class="cm">-- 1 file = 1 process = 1 thing to deploy. At 500 topics: still 1 job.</span></pre>
   </div>
 
-  <h3>Where the "5 tables" distinction survives</h3>
+  <h3>Where per-table structure is restored</h3>
   <p>
-    Nothing upstream of the merge knows or cares which table a row belongs to — every row lands in the same
-    <code>CDC_LANDING</code> table as an opaque JSON payload. The single merge routine is what re-introduces
-    per-table structure: it reads Teradata's native JSON dot-path against the landed payload
-    (<code>payload."after".field</code>) and applies one <code>MERGE</code> per target table, filtered to that table's rows.
-    Functionally this is one execution touching 5 targets, not 5 separate jobs.
+    Nothing upstream of the merge knows or cares which table a row belongs to — every row lands in
+    <code>CDC_LANDING</code> as an opaque JSON payload. The merge routine is what re-introduces per-table
+    structure: it reads Teradata's native JSON dot-path notation against the landed payload
+    (<code>payload."after".field</code>) and applies one <code>MERGE</code> per target table, filtered to that
+    table's rows. Functionally this is one execution touching five targets, not five separate jobs.
+  </p>
+  <p>
+    The Debezium envelope carries its own <code>source.table</code> field, so the routing key arrives with the
+    data — the loader does not need to stamp or partition anything.
   </p>
 
-  <h2>What to expect on the dashboard</h2>
+  <h2>Why it works</h2>
   <p>
-    The <strong>Scenario B</strong> card shows a job-count badge of <code>1/1 jobs running</code>, an overhead readout of
-    1 process and 2 Teradata sessions (versus Scenario A's 5 and 10 for the same 5 tables), and a single row in the
-    jobs table — <span class="job-name">demo_b_all</span> — with one set of start/kill/restart buttons. The per-table
-    row-delta breakdown still shows all 5 tables individually (the fan-out merge keeps that granularity downstream), even
-    though there's only one job and one landing table feeding it.
+    Consolidation is safe here because the five pipelines were never doing five different things. They read from
+    one cluster, write to one database, share an SLA and share an owner. Scenario A pays for isolation between
+    them; Scenario B observes that nobody was using that isolation and declines to pay.
+  </p>
+  <p>
+    The landing table earns its place for CDC specifically: a Debezium change envelope is semi-structured and
+    does not map onto flat TPT <code>SCHEMA</code> columns, so landing it verbatim as text and shredding it
+    downstream is both the simplest and the most auditable approach. It also leaves a raw-payload trail that can
+    be replayed if merge logic ever needs correcting — a property Scenario A shares but
+    <a href="/static/pages/scenario-d.html">Scenario D</a> deliberately gives up.
+  </p>
+  <p>
+    Real-world deployments of this shape run comfortably in the range of 8,000&ndash;40,000 rows/sec with
+    100&ndash;500ms loader latency, and the pattern is corroborated at scale: a logistics operator processing
+    500M messages/day across 17 sources at 6,200 rows/sec for roughly 0.2% additional CPU; a global automotive
+    manufacturer at 8,000 msg/sec; a telco reference handling a billion messages an hour.
   </p>
 
+  <h2>Trade-offs</h2>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li><strong>Job count is constant</strong> — it does not grow with table count</li>
+        <li><strong>Smallest footprint of any CDC pattern here</strong> — 1 process, 2 sessions for all 5 tables</li>
+        <li>One artefact to deploy, monitor, alert on and restart</li>
+        <li>A new table is a job-definition edit, not a new deployment</li>
+        <li>Landing table provides a raw-payload audit and replay trail</li>
+        <li>Merge logic is written once, not once per table</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li><strong>Shared fate</strong> — stopping the job stops every table it serves</li>
+        <li>One priority and one flush interval for all tables in the job</li>
+        <li>No per-table SLA — a hot table cannot be favoured over a cold one</li>
+        <li>Merge cadence, not TPT, usually dominates end-to-end latency</li>
+        <li>The fan-out merge is a real component to design, test and own</li>
+        <li>Per-table cost attribution requires tagging rather than falling out for free</li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    If the shared-fate row above is the blocker — and for some tables it legitimately is —
+    <a href="/static/pages/scenario-c.html">Scenario C</a> shows that it does not have to be all-or-nothing.
+  </p>
+
+  <h2>What the dashboard shows</h2>
+  <p>
+    The Scenario B card shows <code>1/1 jobs running</code> and a single row in the jobs table —
+    <span class="job-name">demo_b_all</span> — with one set of controls. The per-table row-delta breakdown still
+    shows all five tables individually, because the fan-out merge preserves that granularity downstream even
+    though one job and one landing table feed it.
+  </p>
+  <div class="footprint">
+    <div class="stat"><div class="val">1</div><div class="lbl">TPT process</div></div>
+    <div class="stat"><div class="val">2</div><div class="lbl">Teradata sessions</div></div>
+    <div class="stat"><div class="val">1</div><div class="lbl">landing table</div></div>
+    <div class="stat"><div class="val">1</div><div class="lbl">merge routine</div></div>
+  </div>
+  <p>
+    Compare that row against Scenario A's card while both are running: <strong>1 process against 5, and 2
+    sessions against 10, for exactly the same five tables and the same live data.</strong>
+  </p>
   <div class="callout warn">
-    <p><strong>The tradeoff demo moment:</strong> click <em>kill</em> on <span class="job-name">demo_b_all</span> — and unlike
-    Scenario A, <strong>all 5 tables</strong> stop landing rows at once, because they share one process. This is the
-    honest cost of consolidation: you trade per-table failure isolation for a dramatically smaller operational footprint.
-    Restarting brings all 5 back together, too.</p>
+    <p><strong>The trade-off, live:</strong> stopping <span class="job-name">demo_b_all</span> halts all five
+    tables at once, because they share one process. This is the honest cost of consolidation — per-table failure
+    isolation is exchanged for a dramatically smaller operational footprint. Restarting brings all five back
+    together.</p>
   </div>
 
-  <h2>Why this is the recommended pattern</h2>
+  <h2>Where this pattern fits</h2>
+  <div class="fit">
+    <div class="side use">
+      <div class="side-label">Choose it when</div>
+      <ul>
+        <li>Tens to hundreds of CDC tables from one or a few source databases</li>
+        <li>Tables broadly share an SLA, an owner and a priority</li>
+        <li>The estate grows — new tables should not mean new deployments</li>
+        <li>Staged raw payloads are wanted for audit or replay</li>
+        <li>Operational simplicity is the constraint that actually binds</li>
+      </ul>
+    </div>
+    <div class="side skip">
+      <div class="side-label">Reconsider when</div>
+      <ul>
+        <li>Specific tables carry a real-time SLA the shared cadence cannot meet</li>
+        <li>Regulatory separation demands isolated pipelines for named tables</li>
+        <li>The estate is small enough that per-table jobs cost nothing to run</li>
+        <li>The source is already flat — see <a href="/static/pages/scenario-d.html">Scenario D</a></li>
+      </ul>
+    </div>
+  </div>
   <p>
-    This is  the <strong>Tier 1 / best-practice</strong> production
-    design, scaled down to 5 tables for the room to watch. At real scale, the same shape handles 10–30 Debezium connectors
-    grouped by domain, consolidated into 1–3 Kafka topics, feeding 1 TPT job, feeding 1 landing table, feeding one fan-out
-    merge that writes to however many target tables exist — 5 or 500, the job count doesn't change.
-    See <a href="/static/pages/scaling.html">Scaling to 500</a> for the throughput numbers and independently corroborated
-    real-world benchmarks at this scale.
+    At full scale this shape becomes 10&ndash;30 Debezium connectors grouped by domain, consolidated into
+    1&ndash;3 Kafka topics, feeding one TPT job, one landing table and one fan-out merge that writes to however
+    many target tables exist. Five or five hundred, the job count does not change. See
+    <a href="/static/pages/scaling.html">Scaling to 500</a> for the full comparison.
   </p>
 
   <div class="pagenav">

@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Scenario A — Kafka CDC → TPT → Teradata Demo</title>
+<title>Scenario A — Job Per Table</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -21,25 +21,33 @@
 <div class="page">
 
   <div class="eyebrow">Scenario A</div>
-  <h1>5 topics, 5 jobs, 5 of everything</h1>
-  <p class="subtitle">The "obvious" approach — and the one that doesn't scale.</p>
+  <h1>One job per table</h1>
+  <p class="subtitle">Maximum isolation, minimum shared fate — and a cost that grows with every table you add.</p>
 
-  <div class="callout">
-    <p><strong>The pitch this scenario role-plays:</strong> "each table is a Kafka topic, so just give each topic its own ingestion job." It's the instinct almost everyone reaches for first, and at 5 tables it works beautifully — that's the point.</p>
-  </div>
+  <h2>What this scenario covers</h2>
+  <p>
+    Scenario A mirrors the source topology exactly: each Kafka topic gets its own TPT job, its own landing table
+    and its own merge routine. Nothing is shared between the five pipelines except the topics themselves.
+  </p>
+  <p>
+    This is the pattern most teams design first, and for good reason — it is the most defensible one on a
+    whiteboard. Every table is independent, every failure is contained, and every pipeline can be tuned,
+    scheduled and charged separately. At five tables it works cleanly, and this demo runs it for real rather than
+    describing it, so the comparison against B and C is like-for-like.
+  </p>
 
   <h2>Shape</h2>
   <table>
     <tbody>
-      <tr><td>Kafka topics</td><td>5 (<code>cdc.public.customer</code>, <code>account</code>, <code>card</code>, <code>payment</code>, <code>transaction</code>)</td></tr>
+      <tr><td>Kafka topics</td><td>5 — <code>cdc.public.customer</code>, <code>account</code>, <code>card</code>, <code>payment</code>, <code>transaction</code></td></tr>
       <tr><td>TPT jobs</td><td><strong>5</strong> — one per topic, one OS process each</td></tr>
       <tr><td>Landing tables</td><td>5 — <code>DEMO_A.CUSTOMER_LANDING</code>, <code>ACCOUNT_LANDING</code>, <code>CARD_LANDING</code>, <code>PAYMENT_LANDING</code>, <code>TRANSACTION_LANDING</code></td></tr>
-      <tr><td>Target tables</td><td>5 — <code>DEMO_A.CUSTOMER</code>, <code>"ACCOUNT"</code>, <code>CARD</code>, <code>PAYMENT</code>, <code>"TRANSACTION"</code></td></tr>
-      <tr><td>Merge routines</td><td>5 — one idempotent MERGE per table, on its own polling loop</td></tr>
+      <tr><td>Target tables</td><td>5 — under <code>DEMO_A</code></td></tr>
+      <tr><td>Merge routines</td><td>5 — one idempotent MERGE per table, each on its own polling loop</td></tr>
     </tbody>
   </table>
 
-  <h2>How it works</h2>
+  <h2>The approach</h2>
 
   <!-- SVG topology diagram -->
   <div class="diagram-wrap">
@@ -128,17 +136,21 @@
 
       <!-- Teradata right-edge bar -->
       <rect x="724" y="26" width="4" height="164" rx="2" fill="#FF5F02"/>
+
+      <text x="380" y="212" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9.5">Five parallel pipelines, sharing nothing. Every column scales one-for-one with table count.</text>
     </svg>
   </div>
 
   <p>
-    Each job is completely independent end to end: its own Kafka consumer group, its own TPT process, its own landing table,
-    its own merge loop. Nothing is shared between the 5 pipelines except the source topics themselves.
+    Each job runs a single <code>DATACONNECTOR PRODUCER</code> — the Kafka Access Module subscribed to one topic
+    — feeding a single <code>STREAM</code> operator that inserts the raw Debezium payload into that table's
+    landing table. A per-table merge routine then shreds the JSON envelope into the target table on its own
+    polling loop.
   </p>
 
-  <h3>What the tbuild script looks like (transaction table)</h3>
+  <h3>The job definition</h3>
   <div class="code-block">
-    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (Scenario A)</div>
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (Scenario A, abridged)</div>
     <pre><span class="cm">-- One job: 1 Kafka reader + 1 Stream operator + 1 landing table</span>
 <span class="kw">DEFINE JOB</span> DEMO_A_LOAD_TRANSACTION
 <span class="kw">DESCRIPTION</span> <span class="st">'Scenario A: 1 topic -> 1 TPT job -> 1 target table (transaction)'</span>
@@ -149,8 +161,9 @@
   <span class="ty">TYPE DATACONNECTOR PRODUCER</span>
   <span class="kw">SCHEMA</span> TXN_RAW_SCHEMA
   <span class="kw">ATTRIBUTES</span> (
+    <span class="ty">VARCHAR</span> Format              = <span class="st">'DELIMITED'</span>,
     <span class="ty">VARCHAR</span> AccessModuleName    = <span class="st">'$(KAFKA_AXSMOD_NAME)'</span>,
-    <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T $(KAFKA_TOPIC) -B $(KAFKA_BOOTSTRAP)</span>
+    <span class="ty">VARCHAR</span> AccessModuleInitStr = <span class="st">'-M C -T cdc.public.transaction -B $(KAFKA_BOOTSTRAP)</span>
 <span class="st">                                    -P * -X group.id=$(KAFKA_GROUP_ID)</span>
 <span class="st">                                    -W $(KAFKA_IDLE_TIMEOUT)'</span>
   );
@@ -173,45 +186,99 @@
 );
 
 <span class="cm">-- Run with: tbuild -f load_transaction.tbuild -j demo_a_transaction -l 5 -z 10</span>
-<span class="cm">-- Repeat this entire file 4 more times for customer/account/card/payment.</span>
-<span class="cm">-- 5 files = 5 processes = 5 console windows.</span></pre>
+<span class="cm">-- This entire file is then repeated for customer / account / card / payment.</span>
+<span class="cm">-- 5 files = 5 processes = 5 things to deploy, monitor and restart.</span></pre>
+  </div>
+  <p>
+    Note the last comment. The job itself is short and clear — that is the pattern's appeal. The cost is not in
+    any one file; it is in the fact that there are five of them, and at 500 tables there would be 500.
+  </p>
+
+  <h2>Why it works</h2>
+  <p>
+    Nothing is shared, so nothing can interfere. Each job holds its own Kafka consumer group, its own process,
+    its own Teradata sessions, its own landing table and its own merge. A failure, a slow merge, a schema change
+    or a restart in one pipeline is invisible to the other four. Per-table flush intervals and priorities can be
+    tuned independently, and cost attribution per table is exact.
+  </p>
+  <p>
+    For a small, stable estate this is a genuinely good design, and it is the right answer more often than the
+    "consolidate everything" reflex admits. The question is only ever <em>how many tables</em>.
+  </p>
+
+  <h2>Trade-offs</h2>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li><strong>Complete failure isolation</strong> — no shared process, no shared fate</li>
+        <li><strong>Per-table tuning</strong> of flush interval, sessions and priority</li>
+        <li><strong>Exact cost attribution</strong> and per-table chargeback</li>
+        <li><strong>Simplest mental model</strong> — job topology mirrors schema topology</li>
+        <li><strong>Independent restart</strong> without coordinating with any other table</li>
+        <li>No fan-out merge logic to design or own</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li><strong>Every artefact multiplies per table</strong> — job, landing table, merge, alert, runbook entry</li>
+        <li><strong>Resource footprint scales linearly</strong> — 5&times; the processes and sessions of Scenario B for identical work</li>
+        <li>A schema or connection change means editing one job per table</li>
+        <li>Monitoring noise grows with table count; per-table dashboards stop being readable</li>
+        <li>Deployment and release effort grows with the estate, not the data</li>
+        <li>Operational cost dominates total cost well before data volume does</li>
+      </ul>
+    </div>
   </div>
 
-  <h3>What "job" means concretely</h3>
+  <h2>What the dashboard shows</h2>
   <p>
-    A job is a real <code>tbuild</code> process — e.g. <span class="job-name">demo_a_transaction</span> — running the Teradata
-    Kafka Access Module against one topic with a 5-second flush interval (<code>-l 5</code>, without which rows would buffer
-    forever and never appear) and 10-second checkpointing (<code>-z 10</code>). On this deployment these run as native
-    Windows processes, each in its own console window, so the room can literally count "5 windows, 5 jobs."
+    The Scenario A card shows <code>5/5 jobs running</code>, a footprint summed across all five
+    <code>tbuild</code> processes, a per-table row-delta breakdown, and five rows in the jobs table — each
+    independently controllable. This is the only scenario where those controls act on five separately
+    addressable things.
   </p>
-
-  <h2>What to expect on the dashboard</h2>
-  <p>
-    The <strong>Scenario A</strong> card shows a job-count badge like <code>5/5 jobs running</code>, an overhead readout
-    (summed CPU/memory across all 5 <code>tbuild.exe</code> processes, 5 processes, 10 Teradata sessions), a per-table
-    row-delta table, and 5 rows in the jobs table — each with its own <strong>start / kill / restart</strong> buttons. This
-    is the only scenario where those buttons act on 5 independently-addressable things instead of 1 or 2.
-  </p>
-
+  <div class="footprint">
+    <div class="stat"><div class="val">5</div><div class="lbl">TPT processes</div></div>
+    <div class="stat"><div class="val">10</div><div class="lbl">Teradata sessions</div></div>
+    <div class="stat"><div class="val">5</div><div class="lbl">landing tables</div></div>
+    <div class="stat"><div class="val">5</div><div class="lbl">merge routines</div></div>
+  </div>
   <div class="callout info">
-    <p><strong>The isolation demo moment:</strong> click <em>kill</em> on <span class="job-name">demo_a_transaction</span>. Its row-delta
-    and latency go flat while <code>customer</code>/<code>account</code>/<code>card</code>/<code>payment</code> keep landing rows —
-    and so do Scenarios B and C entirely, since they're unaffected by anything happening in A. Click <em>restart</em>: the job
-    resumes and transaction rows start flowing again. This is genuinely Scenario A's strength: a failure in one table's pipeline
-    cannot touch another table's pipeline.</p>
+    <p><strong>Failure isolation, live:</strong> stopping <span class="job-name">demo_a_transaction</span> halts
+    only the <code>transaction</code> table. Row deltas and latency for <code>customer</code>,
+    <code>account</code>, <code>card</code> and <code>payment</code> continue unaffected — as do Scenarios B, C
+    and D entirely. Restarting resumes that table alone. This is Scenario A's real and substantial strength.</p>
   </div>
 
-  <h2>Why this doesn't scale</h2>
+  <h2>Where this pattern fits</h2>
+  <div class="fit">
+    <div class="side use">
+      <div class="side-label">Choose it when</div>
+      <ul>
+        <li>The estate is small and stable — roughly 20 tables or fewer</li>
+        <li>Tables have genuinely different SLAs, priorities or owners</li>
+        <li>Per-table failure isolation is a hard requirement for every table</li>
+        <li>Per-table cost attribution is contractually required</li>
+      </ul>
+    </div>
+    <div class="side skip">
+      <div class="side-label">Reconsider when</div>
+      <ul>
+        <li>The table count runs to the hundreds</li>
+        <li>Tables share an SLA and an owner — you are paying for isolation nobody uses</li>
+        <li>The estate grows regularly, so every new table means a new deployment</li>
+        <li>The operations team is sized for the data, not for the plumbing</li>
+      </ul>
+    </div>
+  </div>
   <p>
-    That isolation is bought with process count. At 5 tables, 5 processes is completely manageable — a person can watch 5
-    console windows. At 500 tables, this pattern means <strong>500 independent <code>tbuild</code> processes</strong>, each
-    holding its own set of Teradata sessions, each needing its own monitoring, restart logic, and on-call runbook entry.
-  </p>
-  <p>
-    Worse, it doesn't just get operationally painful — it becomes <em>mechanically infeasible</em>: Teradata's per-PE and
-    per-gateway session ceilings mean only a fraction of 500 independent jobs can run concurrently on any real system size.
-    The rest queue, sometimes for hours. See the <a href="/static/pages/scaling.html">scaling page</a> for the exact numbers —
-    this is the load-bearing argument the whole demo is building toward.
+    At 500 tables this pattern means 500 job definitions, 500 landing tables, 500 merge routines and 500 entries
+    in the on-call runbook — for the same rows that <a href="/static/pages/scenario-b.html">Scenario B</a> lands
+    with one of each. <a href="/static/pages/scaling.html">Scaling to 500</a> puts numbers on that difference.
+    If some of your tables genuinely need this isolation but most do not,
+    <a href="/static/pages/scenario-c.html">Scenario C</a> is the pattern that gives you both.
   </p>
 
   <div class="pagenav">

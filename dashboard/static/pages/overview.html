@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Overview — Kafka CDC → TPT → Teradata Demo</title>
+<title>Overview — Loading Kafka at Scale into Teradata</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -20,198 +20,412 @@
 </nav>
 <div class="page">
 
-  <div class="eyebrow">Demo overview</div>
-  <h1>What this demo is</h1>
-  <p class="subtitle">Four topologies, watched side by side — three sharing one live CDC stream, plus a fourth that swaps the source for flat CSV.</p>
+  <div class="eyebrow">Overview</div>
+  <h1>Loading hundreds of Kafka topics into Teradata</h1>
+  <p class="subtitle">Teradata Parallel Transporter consolidates many streaming sources into one loader. This demo runs four topologies live, side by side, against the same data — so the trade-offs are observed rather than asserted.</p>
 
-  <h2>The setup</h2>
+  <h2>The problem this addresses</h2>
   <p>
-    A single PostgreSQL database holds 5 tables — <code>customer</code>, <code>account</code>, <code>card</code>, <code>payment</code>, <code>transaction</code> —
-    with continuous, realistic traffic (inserts, updates, deletes) driven by a load generator. A single Debezium connector captures every
-    change from all 5 tables via logical replication and publishes it to 5 Kafka topics, one per table.
+    A modern ingestion estate rarely has one source. It has hundreds: every table in an operational database
+    captured by CDC, every microservice publishing its own event stream, every batch extract landing on a queue.
+    A realistic target is <strong>up to 500 Kafka topics feeding 500 Teradata tables</strong>, continuously, with
+    business users expecting the warehouse to reflect the source within seconds rather than overnight.
   </p>
   <p>
-    From that point, <strong>three independent topologies</strong> — Scenario A, B, and C — consume the <em>same</em> Kafka topics
-    through three separate consumer groups and load into three parallel Teradata schemas (<code>DEMO_A</code>, <code>DEMO_B</code>, <code>DEMO_C</code>).
-    Nothing is simulated or replayed: all three run continuously, concurrently, against identical live data, so row counts and
-    latency are directly comparable in real time.
+    The instinct is to mirror the source topology one-for-one: 500 topics, so 500 loaders. That instinct is
+    reasonable — it maps cleanly onto the schema, isolates every table from every other, and is easy to reason
+    about. It is also the single most expensive decision available, because <strong>the loader count, not the
+    data volume, is what you end up operating</strong>. Every job is a process to deploy, monitor, alert on,
+    restart, patch and staff. Multiply that by 500 and the pipeline's cost is dominated by its own plumbing.
+  </p>
+  <div class="callout">
+    <p><strong>The core question:</strong> does the number of ingestion jobs have to grow with the number of
+    tables? This demo's answer is no — and the four scenarios show exactly what you gain, and what you give up,
+    at each point on that curve.</p>
+  </div>
+
+  <h2>How TPT loads from Kafka</h2>
+  <p>
+    Teradata Parallel Transporter is a parallel load framework built from <strong>operators</strong> wired
+    together inside a single job definition. Two kinds matter here:
+  </p>
+  <ul>
+    <li>
+      A <strong>producer operator</strong> reads data in. For Kafka, that's a
+      <code>DATACONNECTOR PRODUCER</code> with the <strong>Teradata Kafka Access Module</strong> attached — the
+      access module subscribes to a topic and hands rows to TPT as they arrive.
+    </li>
+    <li>
+      A <strong>consumer operator</strong> writes data out. For continuous low-latency ingestion that's the
+      <code>STREAM</code> operator, which applies row-level DML over multiple Teradata sessions without locking
+      the target table — so the warehouse stays queryable while it loads.
+    </li>
+  </ul>
+  <p>
+    The two are joined by a <strong>data stream</strong>, declared in SQL-like syntax:
+    <code>SELECT ... FROM OPERATOR (producer)</code> feeds
+    <code>APPLY ... TO OPERATOR (consumer)</code>. This is the mechanism the whole demo turns on, because that
+    <code>SELECT</code> is not limited to one producer.
+  </p>
+
+  <!-- SVG: anatomy of a TPT job -->
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif" font-size="12">
+      <defs>
+        <marker id="arr-ov" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="rgba(255,255,255,0.35)"/>
+        </marker>
+      </defs>
+
+      <!-- Job boundary -->
+      <rect x="14" y="34" width="700" height="180" rx="10" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="30" y="26" fill="rgba(255,255,255,0.45)" font-size="10" font-weight="600" letter-spacing="0.06em">ONE TPT JOB — one tbuild process</text>
+
+      <!-- Kafka topics -->
+      <text x="72" y="58" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" letter-spacing="0.05em">KAFKA</text>
+      <rect x="28" y="68" width="88" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="72" y="84" text-anchor="middle" fill="#C4B7F1" font-size="9.5">topic 1</text>
+      <rect x="28" y="100" width="88" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="72" y="116" text-anchor="middle" fill="#C4B7F1" font-size="9.5">topic 2</text>
+      <text x="72" y="140" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="14">&#8942;</text>
+      <rect x="28" y="150" width="88" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="72" y="166" text-anchor="middle" fill="#C4B7F1" font-size="9.5">topic N</text>
+
+      <!-- Producer operators -->
+      <line x1="116" y1="80" x2="146" y2="80" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" marker-end="url(#arr-ov)"/>
+      <line x1="116" y1="112" x2="146" y2="112" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" marker-end="url(#arr-ov)"/>
+      <line x1="116" y1="162" x2="146" y2="162" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" marker-end="url(#arr-ov)"/>
+
+      <text x="212" y="58" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" letter-spacing="0.05em">PRODUCER OPERATORS</text>
+      <rect x="148" y="68" width="128" height="24" rx="5" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.16)" stroke-width="1"/>
+      <text x="212" y="84" text-anchor="middle" fill="rgba(255,255,255,0.78)" font-size="9">DATACONNECTOR + AXSMOD</text>
+      <rect x="148" y="100" width="128" height="24" rx="5" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.16)" stroke-width="1"/>
+      <text x="212" y="116" text-anchor="middle" fill="rgba(255,255,255,0.78)" font-size="9">DATACONNECTOR + AXSMOD</text>
+      <text x="212" y="140" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="14">&#8942;</text>
+      <rect x="148" y="150" width="128" height="24" rx="5" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.16)" stroke-width="1"/>
+      <text x="212" y="166" text-anchor="middle" fill="rgba(255,255,255,0.78)" font-size="9">DATACONNECTOR + AXSMOD</text>
+
+      <!-- Fan-in to data stream -->
+      <line x1="276" y1="80" x2="330" y2="120" stroke="rgba(4,206,126,0.35)" stroke-width="1.2"/>
+      <line x1="276" y1="112" x2="330" y2="120" stroke="rgba(4,206,126,0.35)" stroke-width="1.2"/>
+      <line x1="276" y1="162" x2="330" y2="120" stroke="rgba(4,206,126,0.35)" stroke-width="1.2"/>
+
+      <!-- Data stream -->
+      <rect x="332" y="94" width="132" height="52" rx="8" fill="rgba(4,206,126,0.10)" stroke="rgba(4,206,126,0.32)" stroke-width="1.5"/>
+      <text x="398" y="114" text-anchor="middle" fill="#04CE7E" font-size="11" font-weight="600">TPT data stream</text>
+      <text x="398" y="130" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9">SELECT ... FROM OPERATOR</text>
+      <text x="398" y="141" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9">UNION ALL across producers</text>
+
+      <!-- Arrow to consumer -->
+      <line x1="464" y1="120" x2="502" y2="120" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr-ov)"/>
+
+      <!-- Consumer operator -->
+      <text x="588" y="58" text-anchor="middle" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" letter-spacing="0.05em">CONSUMER OPERATOR</text>
+      <rect x="504" y="94" width="168" height="52" rx="8" fill="rgba(255,95,2,0.10)" stroke="rgba(255,95,2,0.32)" stroke-width="1.5"/>
+      <text x="588" y="114" text-anchor="middle" fill="#ffaa66" font-size="11" font-weight="600">STREAM operator</text>
+      <text x="588" y="130" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9">APPLY ... TO OPERATOR</text>
+      <text x="588" y="141" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9">row-level DML, no table lock</text>
+
+      <!-- Arrow to Teradata -->
+      <line x1="672" y1="120" x2="742" y2="120" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr-ov)"/>
+
+      <!-- Teradata -->
+      <rect x="744" y="88" width="102" height="64" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <rect x="744" y="88" width="4" height="64" rx="2" fill="#FF5F02"/>
+      <text x="798" y="114" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">Teradata</text>
+      <text x="798" y="132" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="9.5">target tables</text>
+
+      <!-- Caption -->
+      <text x="364" y="196" text-anchor="middle" fill="rgba(255,255,255,0.38)" font-size="9.5">One job can hold many producers. That is why job count need not track topic count.</text>
+    </svg>
+  </div>
+
+  <div class="callout info">
+    <p><strong>The key property:</strong> the Kafka Access Module subscribes one reader to one topic — but a TPT
+    job may declare <em>many</em> producer operators and <code>UNION ALL</code> them into a single data stream
+    feeding one consumer. Adding a topic therefore means adding a few lines to a job definition, not adding a
+    job. That single property is what makes 500 topics tractable.</p>
+  </div>
+
+  <h2>What is running in this demo</h2>
+  <p>
+    One PostgreSQL database holds 5 tables — <code>customer</code>, <code>account</code>, <code>card</code>,
+    <code>payment</code>, <code>transaction</code> — under continuous, realistic traffic (inserts, updates,
+    deletes). A single Debezium connector captures every change via logical replication and publishes to 5 Kafka
+    topics, one per table.
   </p>
   <p>
-    <strong>Scenario D runs alongside them, but deliberately isn't part of the same stream.</strong> A separate, standalone
-    generator publishes flat CSV rows for 3 new reference tables (<code>merchant</code>, <code>branch</code>, <code>fx_rate</code>)
-    straight to 3 Kafka topics — no Postgres, no Debezium. It exists to answer a different question than A/B/C do: not "how do
-    you consolidate CDC ingest," but "what changes when the source data is already flat instead of semi-structured JSON."
-    See the dedicated <a href="/static/pages/scenario-d.html">Scenario D</a> page for why that distinction matters mechanically.
+    <strong>Scenarios A, B and C then consume those same topics concurrently</strong>, through three separate
+    consumer groups, into three parallel Teradata schemas (<code>DEMO_A</code>, <code>DEMO_B</code>,
+    <code>DEMO_C</code>). Nothing is replayed or simulated: all three run live against identical data, so row
+    counts, latency and resource footprint are directly comparable in real time.
+  </p>
+  <p>
+    <strong>Scenario D runs alongside on a different premise.</strong> A separate generator publishes flat CSV
+    rows for 3 reference tables (<code>merchant</code>, <code>branch</code>, <code>fx_rate</code>) straight to
+    Kafka — no Postgres, no Debezium. It answers a different question: what changes when the source is already
+    flat rather than a semi-structured CDC envelope.
   </p>
 
   <!-- SVG architecture diagram -->
   <div class="diagram-wrap">
-    <svg viewBox="0 0 860 160" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif" font-size="12">
+    <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif" font-size="12">
       <defs>
         <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="rgba(255,255,255,0.30)"/>
         </marker>
       </defs>
 
-      <!-- Background -->
-      <rect width="860" height="160" fill="transparent"/>
+      <!-- CDC lane label -->
+      <text x="16" y="20" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" letter-spacing="0.06em">CDC SOURCE — scenarios A / B / C</text>
 
       <!-- Postgres -->
-      <rect x="16" y="44" width="130" height="72" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-      <text x="81" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">PostgreSQL</text>
-      <text x="81" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">5 tables</text>
-      <text x="81" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">logical replication</text>
-      <!-- orange accent bar -->
-      <rect x="16" y="44" width="4" height="72" rx="2" fill="#FF5F02"/>
+      <rect x="16" y="44" width="122" height="66" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+      <rect x="16" y="44" width="4" height="66" rx="2" fill="#FF5F02"/>
+      <text x="77" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">PostgreSQL</text>
+      <text x="77" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">5 tables</text>
+      <text x="77" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">logical replication</text>
 
-      <!-- Arrow 1 -->
-      <line x1="146" y1="80" x2="184" y2="80" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="138" y1="77" x2="172" y2="77" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
 
       <!-- Debezium -->
-      <rect x="186" y="44" width="130" height="72" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-      <text x="251" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">Debezium</text>
-      <text x="251" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">1 connector</text>
-      <text x="251" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">Kafka Connect</text>
+      <rect x="174" y="44" width="122" height="66" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+      <text x="235" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">Debezium</text>
+      <text x="235" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">1 connector</text>
+      <text x="235" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">JSON envelope</text>
 
-      <!-- Arrow 2 -->
-      <line x1="316" y1="80" x2="354" y2="80" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="296" y1="77" x2="330" y2="77" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
 
-      <!-- Kafka -->
-      <rect x="356" y="44" width="130" height="72" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-      <text x="421" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">Kafka</text>
-      <text x="421" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">5 topics</text>
-      <text x="421" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">cdc.public.*</text>
+      <!-- Kafka CDC -->
+      <rect x="332" y="44" width="122" height="66" rx="8" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.28)" stroke-width="1"/>
+      <text x="393" y="68" text-anchor="middle" fill="#C4B7F1" font-weight="600" font-size="12">Kafka</text>
+      <text x="393" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">5 topics</text>
+      <text x="393" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">cdc.public.*</text>
 
-      <!-- Arrow 3 -->
-      <line x1="486" y1="80" x2="524" y2="80" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="454" y1="77" x2="488" y2="77" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
 
-      <!-- TPT topologies -->
-      <rect x="526" y="20" width="152" height="120" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-      <text x="602" y="44" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">TPT topologies</text>
-      <rect x="542" y="54" width="120" height="20" rx="4" fill="rgba(4,206,126,0.15)" stroke="rgba(4,206,126,0.30)" stroke-width="1"/>
-      <text x="602" y="68" text-anchor="middle" fill="#04CE7E" font-size="10" font-weight="600">Scenario A — 5 jobs</text>
-      <rect x="542" y="80" width="120" height="20" rx="4" fill="rgba(196,183,241,0.15)" stroke="rgba(196,183,241,0.30)" stroke-width="1"/>
-      <text x="602" y="94" text-anchor="middle" fill="#C4B7F1" font-size="10" font-weight="600">Scenario B — 1 job</text>
-      <rect x="542" y="106" width="120" height="20" rx="4" fill="rgba(255,95,2,0.15)" stroke="rgba(255,95,2,0.30)" stroke-width="1"/>
-      <text x="602" y="120" text-anchor="middle" fill="#ffaa66" font-size="10" font-weight="600">Scenario C — 2 jobs</text>
+      <!-- TPT topologies A/B/C -->
+      <rect x="490" y="26" width="164" height="102" rx="8" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+      <text x="572" y="44" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-weight="600" font-size="11">TPT topologies</text>
+      <rect x="504" y="52" width="136" height="20" rx="4" fill="rgba(4,206,126,0.15)" stroke="rgba(4,206,126,0.30)" stroke-width="1"/>
+      <text x="572" y="66" text-anchor="middle" fill="#04CE7E" font-size="10" font-weight="600">Scenario A — 5 jobs</text>
+      <rect x="504" y="76" width="136" height="20" rx="4" fill="rgba(196,183,241,0.15)" stroke="rgba(196,183,241,0.30)" stroke-width="1"/>
+      <text x="572" y="90" text-anchor="middle" fill="#C4B7F1" font-size="10" font-weight="600">Scenario B — 1 job</text>
+      <rect x="504" y="100" width="136" height="20" rx="4" fill="rgba(255,95,2,0.15)" stroke="rgba(255,95,2,0.30)" stroke-width="1"/>
+      <text x="572" y="114" text-anchor="middle" fill="#ffaa66" font-size="10" font-weight="600">Scenario C — 2 jobs</text>
 
-      <!-- Arrow 4 -->
-      <line x1="678" y1="80" x2="716" y2="80" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="654" y1="77" x2="688" y2="77" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
 
-      <!-- Teradata -->
-      <rect x="718" y="44" width="130" height="72" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-      <text x="783" y="68" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="12">Teradata</text>
-      <text x="783" y="84" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">DEMO_A / DEMO_B</text>
-      <text x="783" y="98" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">DEMO_C</text>
-      <!-- orange accent bar -->
-      <rect x="844" y="44" width="4" height="72" rx="2" fill="#FF5F02"/>
+      <!-- Divider -->
+      <line x1="16" y1="150" x2="844" y2="150" stroke="rgba(255,255,255,0.07)" stroke-width="1" stroke-dasharray="4,4"/>
+
+      <!-- Flat lane label -->
+      <text x="16" y="172" fill="rgba(255,255,255,0.40)" font-size="9.5" font-weight="600" letter-spacing="0.06em">FLAT SOURCE — scenario D</text>
+
+      <!-- CSV generator -->
+      <rect x="174" y="188" width="122" height="52" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+      <text x="235" y="209" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="11">CSV feed</text>
+      <text x="235" y="225" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">flat, typed rows</text>
+
+      <line x1="296" y1="214" x2="330" y2="214" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- Kafka CSV -->
+      <rect x="332" y="188" width="122" height="52" rx="8" fill="rgba(48,83,244,0.12)" stroke="rgba(48,83,244,0.32)" stroke-width="1"/>
+      <text x="393" y="209" text-anchor="middle" fill="#7d97fb" font-weight="600" font-size="11">Kafka</text>
+      <text x="393" y="225" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">3 topics — csv.*</text>
+
+      <line x1="454" y1="214" x2="488" y2="214" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="490" y="188" width="164" height="52" rx="8" fill="rgba(48,83,244,0.10)" stroke="rgba(48,83,244,0.28)" stroke-width="1"/>
+      <rect x="504" y="204" width="136" height="20" rx="4" fill="rgba(48,83,244,0.18)" stroke="rgba(48,83,244,0.35)" stroke-width="1"/>
+      <text x="572" y="218" text-anchor="middle" fill="#7d97fb" font-size="10" font-weight="600">Scenario D — 1 job</text>
+
+      <line x1="654" y1="214" x2="688" y2="214" stroke="rgba(255,255,255,0.25)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- Teradata spanning both -->
+      <rect x="690" y="44" width="154" height="196" rx="8" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.14)" stroke-width="1"/>
+      <rect x="840" y="44" width="4" height="196" rx="2" fill="#FF5F02"/>
+      <text x="767" y="122" text-anchor="middle" fill="rgba(255,255,255,0.90)" font-weight="600" font-size="13">Teradata</text>
+      <text x="767" y="144" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">DEMO_A · DEMO_B</text>
+      <text x="767" y="158" text-anchor="middle" fill="rgba(255,255,255,0.45)" font-size="10">DEMO_C · DEMO_D</text>
     </svg>
   </div>
 
-  <h2>The four scenarios, at a glance</h2>
+  <h2>The four scenarios at a glance</h2>
   <table>
-    <thead><tr><th>Scenario</th><th>Shape</th><th>What it shows</th></tr></thead>
+    <thead><tr><th>Scenario</th><th>Shape</th><th>Jobs</th><th>What it demonstrates</th></tr></thead>
     <tbody>
       <tr>
         <td><span class="tag tag-a">A</span></td>
-        <td>5 topics &rarr; <strong>5 independent TPT jobs</strong> &rarr; 5 landing tables &rarr; 5 target tables</td>
-        <td>The "obvious" approach — one job per table. Full isolation, simplest mental model, but doesn't scale: 5 processes here, 500 at real scale.</td>
+        <td>5 topics &rarr; 5 jobs &rarr; 5 landing tables &rarr; 5 targets</td>
+        <td>5</td>
+        <td>One job per table. Complete failure isolation and the simplest mental model — at a cost that grows linearly with every table added.</td>
       </tr>
       <tr>
         <td><span class="tag tag-b">B</span></td>
-        <td>5 topics &rarr; <strong>1 consolidated TPT job</strong> &rarr; 1 landing table &rarr; fan-out merge &rarr; 5 target tables</td>
-        <td>The recommended production pattern. One job handles every topic — and handles 500 exactly the same way it handles 5.</td>
+        <td>5 topics &rarr; 1 job &rarr; 1 landing table &rarr; fan-out merge &rarr; 5 targets</td>
+        <td>1</td>
+        <td>Consolidation. One job serves every topic, and serves 500 the same way it serves 5.</td>
       </tr>
       <tr>
         <td><span class="tag tag-c">C</span></td>
-        <td>5 topics &rarr; <strong>2 tiered TPT jobs</strong> (1 hot + 1 warm/cold) &rarr; 5 target tables</td>
-        <td>The middle ground: per-table isolation only where it earns its keep, consolidation everywhere else.</td>
+        <td>5 topics &rarr; 2 jobs (1 hot + 1 warm) &rarr; 5 targets</td>
+        <td>2</td>
+        <td>Tiering. Isolation purchased only for the tables whose SLA actually requires it; consolidation everywhere else.</td>
       </tr>
       <tr>
         <td><span class="tag tag-d">D</span></td>
-        <td>3 <em>non-CDC</em> topics &rarr; <strong>1 consolidated TPT job</strong> &rarr; <strong>0 landing tables</strong> &rarr; 3 target tables</td>
-        <td>Same "one job" idea as B, but the source is already flat CSV, not semi-structured JSON — so the landing table and merge step disappear entirely.</td>
+        <td>3 flat topics &rarr; 1 job &rarr; <strong>0 landing tables</strong> &rarr; 3 targets</td>
+        <td>1</td>
+        <td>Direct load. When the source is already flat, TPT upserts straight into the targets — the staging tier disappears.</td>
       </tr>
     </tbody>
   </table>
-  <p>See the dedicated <a href="/static/pages/scenario-a.html">Scenario A</a>, <a href="/static/pages/scenario-b.html">Scenario B</a>,
-     <a href="/static/pages/scenario-c.html">Scenario C</a>, and <a href="/static/pages/scenario-d.html">Scenario D</a>
-     pages for how each one actually works and what to expect on screen.</p>
 
-  <h2>Why three scenarios instead of just building the "right" one</h2>
+  <h2>The patterns compared</h2>
   <p>
-    Scenario A is deliberately built and run for real, not just described, because "one job per table" is the instinct almost every
-    audience reaches for first — it maps directly onto the source schema and feels safe. Watching it work at 5 tables makes that
-    instinct feel reasonable <em>before</em> the concurrency math in the <a href="/static/pages/scaling.html">scaling page</a> undercuts it at
-    500. Scenario B is what's actually recommended for production. Scenario C exists for the customer who says
-    "but I need per-table isolation for compliance" — it shows that isolation and consolidation aren't mutually exclusive if you
-    apply isolation only where the latency SLA actually demands it.
+    Each scenario is a runnable instance of a production pattern. The trade-offs below are what the live
+    dashboard makes visible — every claim here is observable on screen while the pipelines run.
   </p>
 
-  <h2>A fourth topology, a different premise</h2>
+  <h3>A — Job per table</h3>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li>Total failure isolation — one table's outage cannot reach another's</li>
+        <li>Per-table tuning, scheduling and priority</li>
+        <li>Trivial to reason about and to attribute cost</li>
+        <li>Per-table restart without touching any other pipeline</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li>Every artefact multiplies: jobs, landing tables, merges, alerts, runbooks</li>
+        <li>Resource footprint scales linearly — 5&times; the processes and sessions of B for the same 5 tables</li>
+        <li>Schema change means touching one job per table</li>
+        <li>Operational effort dominates total cost long before the data does</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>B — One consolidated job</h3>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li>Job count is constant — adding a table adds lines, not processes</li>
+        <li>Smallest possible operational and resource footprint</li>
+        <li>One place to monitor, alert, deploy and restart</li>
+        <li>Landing table doubles as a raw-payload audit and replay trail</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li>Shared fate — stopping the job stops every table it serves</li>
+        <li>One priority for all tables in the job; no per-table SLA</li>
+        <li>Merge cadence, not TPT, tends to dominate end-to-end latency</li>
+        <li>Fan-out merge logic is a component to own and test</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>C — Tiered</h3>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li>Real isolation and low latency exactly where the business needs it</li>
+        <li>Consolidated economics for the long tail</li>
+        <li>Per-tier priority and workload management</li>
+        <li>Directly answers a hard isolation or compliance requirement</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li>Two patterns to build, document and operate instead of one</li>
+        <li>Requires an honest, maintained view of which tables are genuinely hot</li>
+        <li>Tier membership drifts as the business changes</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>D — Direct multi-table load</h3>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li>No landing tables, no merge routines, no staging storage</li>
+        <li>Lowest latency of the four — TPT flush time alone</li>
+        <li>Fewest moving parts of any pattern here</li>
+        <li>Upsert logic lives in the job, with nothing downstream to schedule</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li>Requires a flat, typed source — not a CDC change envelope</li>
+        <li>No staged raw payload, so no replay-from-landing safety net</li>
+        <li>Shared fate across the tables in the job, as with B</li>
+        <li>Routing logic sits inside the job's DML</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Which pattern for which workload</h2>
+  <table>
+    <thead><tr><th>If your workload looks like this</th><th>Start here</th></tr></thead>
+    <tbody>
+      <tr><td>Hundreds of CDC tables from one or a few databases, uniform SLA</td><td><span class="tag tag-b">B</span> &mdash; consolidate</td></tr>
+      <tr><td>Hundreds of tables, but 10&ndash;20 carry a genuine real-time SLA</td><td><span class="tag tag-c">C</span> &mdash; tier them</td></tr>
+      <tr><td>A small, stable estate — roughly 20 tables or fewer</td><td><span class="tag tag-a">A</span> &mdash; per-table is affordable</td></tr>
+      <tr><td>Sources already emitting flat, typed rows to Kafka</td><td><span class="tag tag-d">D</span> &mdash; load direct</td></tr>
+      <tr><td>A mixed estate — most real customers</td><td>Combine: <span class="tag tag-c">C</span> for CDC, <span class="tag tag-d">D</span> for flat feeds</td></tr>
+    </tbody>
+  </table>
   <p>
-    Scenario B's landing-table-plus-fan-out-merge pattern exists to solve a specific problem: Debezium's JSON envelope
-    (<code>before</code>/<code>after</code>/<code>source</code>) doesn't map onto flat TPT <code>SCHEMA</code> columns, so it
-    gets landed as raw text and shredded later by a downstream <code>MERGE</code>. Scenario D asks what happens to that pattern
-    when the source data is already flat and typed — and the answer, verified live against a real Teradata target, is that it
-    disappears entirely. One TPT job, three comma-joined <code>APPLY</code> clauses sharing one <code>SELECT</code>, upserting
-    straight into <code>DEMO_D.MERCHANT</code> / <code>BRANCH</code> / <code>FX_RATE</code> — zero landing tables, zero merge
-    routines.
-  </p>
-  <p>
-    This is the same MultiLoad-derived mechanism TPT has supported for decades (up to 5 target tables from one job), just not
-    previously exercised in this demo. It's not a strictly-better replacement for Scenario B's CDC pattern — Scenario D trades
-    away the landing table's raw-payload audit/replay trail, which matters if a customer's compliance story leans on staged
-    raw-event retention. It's the same "consolidate ingest" thesis Scenario B argues for, one step further, for the subset of
-    real-world sources — batch extracts, pre-normalized message-queue feeds, application event streams with a fixed schema —
-    where the data shape allows skipping the landing tier altogether. See the <a href="/static/pages/scenario-d.html">Scenario D</a>
-    page for the exact TPT grammar and the constraints found only by hitting them.
+    The <a href="/static/pages/scaling.html">Scaling to 500</a> page works through the reasoning behind each of
+    these, with the cost model that separates them.
   </p>
 
-  <h2>What you'll see on the live dashboard</h2>
+  <h2>What the live dashboard shows</h2>
   <p>
-    The <a href="/">dashboard</a> shows one card per scenario — <strong>four now</strong>, A through D: how many of its jobs
-    are running, total rows landed, an overhead readout (CPU%, memory, process count, and Teradata session count for that
-    scenario's jobs), a per-table breakdown with row deltas, landing latency, and landing-table backlog, and start/kill/restart
-    controls for every job. Below the cards, a single chart tracks end-to-end latency (source commit &rarr; Teradata landing)
-    for all four scenarios at once — that latency line is the single most persuasive number in the room, because it's real
-    data hitting four different pipelines simultaneously.
+    The <a href="/">dashboard</a> presents one card per scenario: jobs running, total rows landed, resource
+    footprint (memory, process count and Teradata session count for that scenario's jobs), a per-table breakdown
+    with row deltas and landing latency, and start/kill/restart controls for every job. A single chart tracks
+    end-to-end latency — source commit to Teradata landing — for all four scenarios simultaneously.
   </p>
   <p>
-    The overhead readout is where the isolation-vs-consolidation tradeoff stops being an abstract argument: Scenario A's
-    card shows 5 processes and 10 sessions running the same table set that Scenario B's card shows as 1 process and 2
-    sessions. Backlog (rows landed but not yet merged+purged) is the closest available proxy for consumer lag, since
-    TPT's Kafka Access Module doesn't join Kafka's consumer-group protocol and true lag isn't observable through the
-    standard admin API — <strong>except on Scenario D's card, where backlog reads 0 by design</strong>: there's no landing
-    table for anything to back up in, and that's the point being made.
+    The footprint readout is where the isolation-versus-consolidation trade-off becomes concrete rather than
+    rhetorical: <strong>Scenario A shows 5 processes and 10 sessions for exactly the table set Scenario B serves
+    with 1 process and 2 sessions</strong>. Same data, same targets, same moment in time.
   </p>
   <p>
-    Top-level <strong>"Start everything" / "Stop everything"</strong> buttons launch or kill all 9 TPT jobs (5 in A, 1 in B,
-    2 in C, 1 in D) plus the merge loop in one click, for resetting the whole room-facing state between runs without walking
-    each scenario's controls individually. A <strong>merge speed toggle</strong> restarts the merge loop at a faster cadence
-    (1s instead of the default 3s) so you can show landing latency drop live — useful for demonstrating that the merge
-    interval, not the TPT flush, is usually the dominant term in end-to-end latency for A/B/C. Scenario D has no merge loop
-    to speed up — its latency is TPT flush time alone, which is exactly the comparison worth making live.
-  </p>
-  <p>
-    A <strong>burst load</strong> button spikes traffic on both the main load generator (weighted toward <code>transaction</code>,
-    feeding A/B/C) and the CSV load generator (weighted toward <code>fx_rate</code>, feeding D) at once, so you can watch all
-    four scenarios respond to the same moment side by side — each trigger is marked with a dashed line directly on the
-    latency chart, so the room can see cause and effect without you having to narrate the timing. Kill/restart buttons on
-    individual jobs demonstrate the isolation-vs-consolidation tradeoff directly: killing a Scenario A job stops only its
-    one table; killing Scenario B's single job stops all 5; killing Scenario D's single job stops all 3 of its tables too,
-    the same shared-fate tradeoff as B, just without a landing table underneath it.
+    Controls make the trade-off directly observable. Stopping one Scenario A job halts one table while the other
+    four continue. Stopping Scenario B's single job halts all five — the honest price of consolidation. A burst
+    control spikes traffic on both generators at once and marks the moment on the latency chart, so cause and
+    effect are visible without narration. A merge-speed toggle shortens the merge cycle to show landing latency
+    fall live, which demonstrates that for A, B and C the merge interval — not the TPT flush — is usually the
+    dominant term in end-to-end latency. Scenario D has no merge loop to shorten, which is precisely the
+    comparison worth making.
   </p>
 
-  <h2>What this maps back to</h2>
+  <h2>How this maps back to 500</h2>
   <p>
-    This is a 5-table, 3-topology instantiation of a real architectural question a customer with up to <strong>500 Kafka
-    topics / 500 source tables</strong> would face. Every mechanism on screen — consumer groups, landing tables, idempotent
-    merges, job counts — is the same mechanism that would run at that scale, just smaller. The
-    <a href="/static/pages/scaling.html">scaling page</a> walks through exactly how the numbers extrapolate, including the
-    corrected Teradata session-concurrency math behind the "500 independent jobs doesn't work" claim. Scenario D maps back
-    differently — not to the 500-topic CDC question, but to whichever fraction of a customer's 500 tables come from sources
-    that are already flat rather than semi-structured, where the landing tier itself can be designed away.
+    This is a 5-table instantiation of a 500-table question. Every mechanism on screen — consumer groups,
+    producer operators, landing tables, idempotent merges, job counts — is the same mechanism that runs at full
+    scale, just smaller. Nothing changes between 5 tables and 500 except which pattern best fits your tables'
+    latency requirements and your operating model.
+  </p>
+  <p>
+    Start with <a href="/static/pages/scenario-a.html">Scenario A</a> to see the intuitive approach running, then
+    <a href="/static/pages/scenario-b.html">Scenario B</a> for consolidation,
+    <a href="/static/pages/scenario-c.html">Scenario C</a> for tiering, and
+    <a href="/static/pages/scenario-d.html">Scenario D</a> for direct load — or go straight to
+    <a href="/static/pages/scaling.html">Scaling to 500</a> for the recommendation.
   </p>
 
   <div class="pagenav">

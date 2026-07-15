@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Scenario C — Kafka CDC → TPT → Teradata Demo</title>
+<title>Scenario C — Tiered</title>
 <link rel="stylesheet" href="/static/pages/common.css">
 </head>
 <body>
@@ -21,32 +21,43 @@
 <div class="page">
 
   <div class="eyebrow">Scenario C</div>
-  <h1>Tiered: isolate the hot table, consolidate the rest</h1>
-  <p class="subtitle">The middle ground — for the customer who says "but I need per-table isolation for compliance."</p>
+  <h1>Tiered: isolate what's hot, consolidate the rest</h1>
+  <p class="subtitle">Isolation and consolidation are not opposites. Buy isolation only for the tables whose SLA actually requires it.</p>
 
-  <div class="callout">
-    <p><strong>The pitch this scenario proves:</strong> isolation and consolidation aren't mutually exclusive. Give the one
-    table that actually needs low-latency isolation its own job; consolidate everything else. This is the same
-    hot/warm/cold tiering the 500-table recommendation uses — just applied to 5 tables instead of 500.</p>
-  </div>
-
+  <h2>What this scenario covers</h2>
+  <p>
+    Scenarios A and B present a choice: isolate everything and pay per table, or consolidate everything and share
+    fate. Scenario C rejects the premise. It gives the one table with a genuine real-time requirement its own
+    dedicated job, and consolidates the other four behind a single shared job.
+  </p>
+  <p>
+    This is the pattern that answers the most common and most legitimate objection to consolidation — "we need
+    per-table isolation" — without accepting the full cost of Scenario A. In practice the objection is almost
+    never about all 500 tables. It is about a specific handful, and those are the ones worth paying for.
+  </p>
 
   <h2>Shape</h2>
   <table>
     <tbody>
-      <tr><td>Kafka topics</td><td>5 (separate consumer groups per job)</td></tr>
+      <tr><td>Kafka topics</td><td>5 — read through separate consumer groups per tier</td></tr>
       <tr><td>TPT jobs</td><td><strong>2</strong> — 1 dedicated (hot) + 1 consolidated (warm/cold)</td></tr>
       <tr><td>Landing tables</td><td>2 — <code>DEMO_C.TRANSACTION_LANDING</code> (hot) and <code>DEMO_C.WARM_LANDING</code> (shared by 4 tables)</td></tr>
-      <tr><td>Target tables</td><td>5 — all under <code>DEMO_C</code>, same DDL shape as A and B</td></tr>
-      <tr><td>Merge routines</td><td>2 — one dedicated MERGE for <code>transaction</code>, one fan-out MERGE for the other 4</td></tr>
+      <tr><td>Target tables</td><td>5 — under <code>DEMO_C</code>, same DDL shape as A and B</td></tr>
+      <tr><td>Merge routines</td><td>2 — one dedicated for <code>transaction</code>, one fan-out for the other 4</td></tr>
     </tbody>
   </table>
 
-  <h2>How it works</h2>
+  <h2>The approach</h2>
+  <p>
+    The hot tier is structurally Scenario A: one topic, one job, one landing table, one merge — with the flush
+    interval and priority tuned for latency. The warm tier is structurally Scenario B: four topics
+    <code>UNION ALL</code>'d into one job, one shared landing table, one fan-out merge — tuned for efficiency.
+    Scenario C is not a third mechanism; it is the two proven mechanisms applied where each is appropriate.
+  </p>
 
   <!-- SVG tiered topology diagram -->
   <div class="diagram-wrap">
-    <svg viewBox="0 0 780 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
+    <svg viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, sans-serif">
       <defs>
         <marker id="arr-c" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="rgba(255,170,102,0.50)"/>
@@ -57,8 +68,8 @@
       </defs>
 
       <!-- Tier labels -->
-      <text x="4" y="32" fill="rgba(255,170,102,0.70)" font-size="9" font-weight="600" letter-spacing="0.06em">HOT TIER</text>
-      <text x="4" y="152" fill="rgba(196,183,241,0.70)" font-size="9" font-weight="600" letter-spacing="0.06em">WARM TIER</text>
+      <text x="4" y="18" fill="rgba(255,170,102,0.75)" font-size="9" font-weight="600" letter-spacing="0.06em">HOT TIER — dedicated, latency-tuned</text>
+      <text x="4" y="152" fill="rgba(196,183,241,0.75)" font-size="9" font-weight="600" letter-spacing="0.06em">WARM TIER — consolidated, efficiency-tuned</text>
 
       <!-- Hot tier: 1 topic -->
       <rect x="8" y="40" width="120" height="26" rx="5" fill="rgba(255,95,2,0.12)" stroke="rgba(255,95,2,0.35)" stroke-width="1"/>
@@ -82,8 +93,10 @@
       <text x="606" y="57" text-anchor="middle" fill="rgba(255,255,255,0.70)" font-size="9.5">DEMO_C.TRANSACTION</text>
       <rect x="712" y="38" width="4" height="30" rx="2" fill="#FF5F02"/>
 
+      <text x="231" y="92" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="8.5" font-style="italic">same shape as Scenario A — isolation where the SLA demands it</text>
+
       <!-- Divider -->
-      <line x1="8" y1="135" x2="772" y2="135" stroke="rgba(255,255,255,0.06)" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="8" y1="120" x2="772" y2="120" stroke="rgba(255,255,255,0.08)" stroke-width="1" stroke-dasharray="4,4"/>
 
       <!-- Warm tier: 4 topics -->
       <rect x="8" y="158" width="120" height="24" rx="5" fill="rgba(196,183,241,0.10)" stroke="rgba(196,183,241,0.25)" stroke-width="1"/>
@@ -128,12 +141,14 @@
       <rect x="496" y="256" width="220" height="24" rx="5" fill="rgba(255,95,2,0.07)" stroke="rgba(255,95,2,0.18)" stroke-width="1"/>
       <text x="606" y="272" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="9.5">DEMO_C.PAYMENT</text>
       <rect x="712" y="166" width="4" height="114" rx="2" fill="#FF5F02"/>
+
+      <text x="231" y="290" text-anchor="middle" fill="rgba(255,255,255,0.30)" font-size="8.5" font-style="italic">same shape as Scenario B — consolidation for the long tail</text>
     </svg>
   </div>
 
-  <h3>What the tbuild scripts look like</h3>
+  <h3>The job definitions</h3>
   <div class="code-block">
-    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (hot tier, Scenario C)</div>
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_transaction.tbuild (hot tier)</div>
     <pre><span class="cm">-- Hot tier: structurally identical to Scenario A's per-table job</span>
 <span class="kw">DEFINE JOB</span> DEMO_C_LOAD_TRANSACTION
 <span class="kw">DESCRIPTION</span> <span class="st">'Scenario C hot tier: transaction gets its own dedicated job'</span>
@@ -152,7 +167,7 @@
 <span class="cm">-- tbuild -f load_transaction.tbuild -j demo_c_transaction -l 5 -z 10</span></pre>
   </div>
   <div class="code-block">
-    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_warm.tbuild (warm/cold tier, Scenario C)</div>
+    <div class="code-block-header"><div class="lang-dot"></div>tbuild &mdash; load_warm.tbuild (warm/cold tier)</div>
     <pre><span class="cm">-- Warm tier: structurally identical to Scenario B (4 topics UNION ALL'd)</span>
 <span class="kw">DEFINE JOB</span> DEMO_C_LOAD_WARM
 <span class="kw">DESCRIPTION</span> <span class="st">'Scenario C warm tier: 4 topics -> 1 job -> WARM_LANDING -> fan-out merge'</span>
@@ -171,32 +186,103 @@
   );
 );
 <span class="cm">-- tbuild -f load_warm.tbuild -j demo_c_warm -l 5 -z 10</span>
-<span class="cm">-- Net result: 2 jobs total. Best of both patterns.</span></pre>
+<span class="cm">-- Net: 2 jobs. Add a warm table -> edit this file. Add a hot one -> add a job.</span></pre>
   </div>
 
-  <h2>What to expect on the dashboard</h2>
+  <h2>Why it works</h2>
   <p>
-    The <strong>Scenario C</strong> card shows <code>2/2 jobs running</code>, an overhead readout of 2 processes and
-    4 Teradata sessions — between Scenario A's 5/10 and Scenario B's 1/2 for the same 5 tables — and two rows in the
-    jobs table: <span class="job-name">demo_c_transaction</span> and <span class="job-name">demo_c_warm</span>, each
-    independently startable/killable/restartable.
+    Isolation is not free, so it should be bought deliberately rather than by default. Scenario C makes the
+    purchase decision explicit and per-table: the transaction stream — the one with a real latency requirement —
+    gets a dedicated process, its own consumer group, its own merge cadence and its own workload priority.
+    Everything else shares.
   </p>
-  <div class="callout info">
-    <p><strong>Two isolation demo moments, not one:</strong> kill <span class="job-name">demo_c_transaction</span> and only
-    <code>transaction</code> stops (identical to Scenario A's isolation story). Kill <span class="job-name">demo_c_warm</span>
-    instead, and <code>customer</code>/<code>account</code>/<code>card</code>/<code>payment</code> all stop together
-    (identical to Scenario B's shared-fate story) while <code>transaction</code> keeps flowing untouched. Scenario C lets
-    you show both tradeoffs from Scenarios A and B within one topology, because it deliberately contains both patterns.
-  </p></div>
-
-  <h2>Why this is the answer to "we need isolation for compliance"</h2>
   <p>
-    Scenario A shows full isolation but doesn't scale. Scenario B scales perfectly but has a single shared failure domain.
-    Scenario C shows that those aren't the only two options — isolation can be applied selectively, to just the tables
-    whose latency SLA actually demands it, while everything else consolidates. At 500 tables, this is the
-    <strong>tiered architecture</strong>: 10&ndash;20 hot tables each get a dedicated job, the remaining ~480 warm/cold
-    tables share one or a handful of consolidated jobs — landing around 22 total jobs instead of 500, comfortably within
-    any system's session capacity. See <a href="/static/pages/scaling.html">Scaling to 500</a> for the full numbers.
+    The question that drives tier assignment is a business one, not a technical one: <em>which tables would
+    actually cause business impact if they lagged five seconds?</em> In practice the honest answer is a short
+    list — fraud and risk signals, real-time authorisation, inventory reservation — and the rest of the estate
+    turns out to tolerate a shared cadence perfectly well. Tiering encodes that answer directly into the
+    architecture.
+  </p>
+  <p>
+    Because each tier reuses a pattern already proven in isolation, there is nothing novel to validate. The hot
+    tier behaves exactly as Scenario A does; the warm tier behaves exactly as Scenario B does. Both run in this
+    demo simultaneously against the same data as proof.
+  </p>
+
+  <h2>Trade-offs</h2>
+  <div class="proscons">
+    <div class="col pros">
+      <h4>Strengths</h4>
+      <ul>
+        <li><strong>Genuine isolation and low latency</strong> exactly where the business requires it</li>
+        <li><strong>Consolidated economics</strong> for the long tail of tables that don't</li>
+        <li>Per-tier priority and workload management</li>
+        <li>Directly satisfies a hard isolation or compliance requirement on named tables</li>
+        <li>Job count grows only with the <em>hot</em> list, not the whole estate</li>
+        <li>Composed from two already-proven patterns — nothing new to validate</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Costs</h4>
+      <ul>
+        <li><strong>Two patterns to build, document and operate</strong> instead of one</li>
+        <li>Requires an honest, maintained view of which tables are genuinely hot</li>
+        <li>Tier membership drifts as the business changes — it needs periodic review</li>
+        <li>Shared fate still applies <em>within</em> the warm tier</li>
+        <li>Two merge routines and two landing tables rather than one of each</li>
+        <li>Tier boundaries can become political rather than analytical</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>What the dashboard shows</h2>
+  <p>
+    The Scenario C card shows <code>2/2 jobs running</code> and two rows in the jobs table —
+    <span class="job-name">demo_c_transaction</span> and <span class="job-name">demo_c_warm</span> — each
+    independently controllable. Its footprint sits deliberately between A's and B's.
+  </p>
+  <div class="footprint">
+    <div class="stat"><div class="val">2</div><div class="lbl">TPT processes</div></div>
+    <div class="stat"><div class="val">4</div><div class="lbl">Teradata sessions</div></div>
+    <div class="stat"><div class="val">2</div><div class="lbl">landing tables</div></div>
+    <div class="stat"><div class="val">2</div><div class="lbl">merge routines</div></div>
+  </div>
+  <div class="callout info">
+    <p><strong>Both trade-offs, in one topology:</strong> stopping
+    <span class="job-name">demo_c_transaction</span> halts only <code>transaction</code> — Scenario A's isolation
+    behaviour. Stopping <span class="job-name">demo_c_warm</span> instead halts <code>customer</code>,
+    <code>account</code>, <code>card</code> and <code>payment</code> together while <code>transaction</code> keeps
+    flowing — Scenario B's shared-fate behaviour. Scenario C contains both patterns, so both are demonstrable
+    without leaving the card.</p>
+  </div>
+
+  <h2>Where this pattern fits</h2>
+  <div class="fit">
+    <div class="side use">
+      <div class="side-label">Choose it when</div>
+      <ul>
+        <li>SLAs genuinely differ across the estate — some tables are latency-critical, most are not</li>
+        <li>Compliance or regulation demands isolated pipelines for specific named tables</li>
+        <li>A small number of tables carry disproportionate business value</li>
+        <li>Consolidation is the right default but a blanket policy won't survive review</li>
+      </ul>
+    </div>
+    <div class="side skip">
+      <div class="side-label">Reconsider when</div>
+      <ul>
+        <li>Every table really does share one SLA — <a href="/static/pages/scenario-b.html">Scenario B</a> is simpler</li>
+        <li>Nobody can say which tables are hot, so tiering has no basis</li>
+        <li>The estate is small enough that <a href="/static/pages/scenario-a.html">Scenario A</a> costs nothing</li>
+        <li>The hot list keeps growing until it is the whole estate — that's Scenario A with extra steps</li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    At full scale this becomes the tiered architecture: the 10&ndash;20 tables with a real latency requirement
+    get dedicated jobs, and the remaining several hundred share one or a handful of consolidated jobs, each on
+    the appropriate workload tier. Roughly <strong>20&ndash;25 jobs instead of 500</strong>, while still
+    delivering genuine real-time isolation where it is actually needed. See
+    <a href="/static/pages/scaling.html">Scaling to 500</a> for the full comparison.
   </p>
 
   <div class="pagenav">
