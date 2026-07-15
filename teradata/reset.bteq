@@ -1,11 +1,13 @@
 .LOGON ${TD_HOST}/${TD_USER},${TD_PASSWORD};
 .SET ERROROUT STDOUT
 
-/* Clean-slate reset for rehearsal: truncate every landing/target/admin table.
-   Does NOT drop/recreate objects - run the DDL scripts separately if schema
-   changes are needed. Kafka consumer group offsets are untouched; re-register
-   the Debezium connector or reset consumer groups separately if a full replay
-   from the beginning is desired. */
+/* Clean-slate reset for rehearsal: truncate every landing/target/admin table,
+   and drop each TPT job's own auto-created LogTable/ErrorTable pair (see
+   below - these aren't part of the DDL-managed schema, TPT recreates them
+   itself on next job start). Does NOT drop/recreate any DDL-managed table -
+   run the DDL scripts separately if schema changes are needed. Kafka consumer
+   group offsets are untouched; re-register the Debezium connector or reset
+   consumer groups separately if a full replay from the beginning is desired. */
 
 DELETE FROM DEMO_A.CUSTOMER_LANDING ALL;
 DELETE FROM DEMO_A.ACCOUNT_LANDING ALL;
@@ -39,6 +41,45 @@ DELETE FROM DEMO_D.FX_RATE ALL;
 
 DELETE FROM DEMO_ADMIN.CDC_BATCH_CONTROL ALL;
 DELETE FROM DEMO_ADMIN.APPLIED_EVENT_LOG ALL;
+
+/* Drop every TPT job's own auto-created LogTable/ErrorTable pair (the STREAM
+   operator recreates them fresh on its next start). Truncating wouldn't help
+   here - CREATE TABLE's "already exists" (3803) is what breaks a restart, so
+   the table has to not exist at all. Confirmed empirically 2026-07-15: a job
+   left mid-run by an earlier failure (e.g. a bad grant, a killed process) can
+   leave its LT/ET pair in a state where the STREAM operator's next CREATE
+   TABLE attempt errors and the whole job aborts with 0 records processed -
+   not just "rows accumulate", a hard restart failure. SET ERRORLEVEL 3807
+   ("table does not exist") tolerates a first-ever reset, before any job has
+   run yet and created these tables at all. */
+
+.SET ERRORLEVEL 3807 SEVERITY 0
+
+DROP TABLE DEMO_A.CUSTOMER_LANDING_LT;
+DROP TABLE DEMO_A.CUSTOMER_LANDING_ET;
+DROP TABLE DEMO_A.ACCOUNT_LANDING_LT;
+DROP TABLE DEMO_A.ACCOUNT_LANDING_ET;
+DROP TABLE DEMO_A.CARD_LANDING_LT;
+DROP TABLE DEMO_A.CARD_LANDING_ET;
+DROP TABLE DEMO_A.PAYMENT_LANDING_LT;
+DROP TABLE DEMO_A.PAYMENT_LANDING_ET;
+DROP TABLE DEMO_A.TRANSACTION_LANDING_LT;
+DROP TABLE DEMO_A.TRANSACTION_LANDING_ET;
+
+DROP TABLE DEMO_B.CDC_LANDING_LT;
+DROP TABLE DEMO_B.CDC_LANDING_ET;
+
+DROP TABLE DEMO_C.TRANSACTION_LANDING_LT;
+DROP TABLE DEMO_C.TRANSACTION_LANDING_ET;
+DROP TABLE DEMO_C.WARM_LANDING_LT;
+DROP TABLE DEMO_C.WARM_LANDING_ET;
+
+DROP TABLE DEMO_D.MERCHANT_LT;
+DROP TABLE DEMO_D.MERCHANT_ET;
+DROP TABLE DEMO_D.BRANCH_LT;
+DROP TABLE DEMO_D.BRANCH_ET;
+DROP TABLE DEMO_D.FX_RATE_LT;
+DROP TABLE DEMO_D.FX_RATE_ET;
 
 .LOGOFF;
 .QUIT;

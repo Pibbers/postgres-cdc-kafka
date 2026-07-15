@@ -24,6 +24,11 @@ from fastapi.staticfiles import StaticFiles
 TD_HOST = os.getenv("TD_HOST", "192.168.1.205")
 TD_USER = os.getenv("TD_USER", "dbc")
 TD_PASSWORD = os.getenv("TD_PASSWORD", "dbc")
+# TD_USER/TD_PASSWORD above are the admin login this dashboard process itself uses
+# for metrics polling and the merge loop. TPT jobs it launches log on as their own
+# per-job user instead (see JOBS below and teradata/ddl/08_tpt_users.bteq) -
+# TPT_JOB_PASSWORD is the one shared password for all of those service accounts.
+TPT_JOB_PASSWORD = os.getenv("TPT_JOB_PASSWORD", "TptDemo2026Pass")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 LOAD_GEN_URL = os.getenv("LOAD_GEN_URL", "http://localhost:8090")
 CSV_LOAD_GEN_URL = os.getenv("CSV_LOAD_GEN_URL", "http://localhost:8092")
@@ -52,16 +57,18 @@ MERGE_FAST_INTERVAL = 1
 TPT_SESSIONS_PER_JOB = 2
 
 # --- Job registry: everything needed to launch/track/kill each TPT job ---
+# "user" is the per-job Teradata login (see teradata/ddl/08_tpt_users.bteq) - each
+# job is scoped to just its own demo database rather than sharing one admin login.
 JOBS = {
-    "demo_a_customer": dict(script="scenario_a/load_customer.tbuild", db="DEMO_A", topic="cdc.public.customer", group="tpt.demo_a.customer", scenario="A", tables=["customer"]),
-    "demo_a_account": dict(script="scenario_a/load_account.tbuild", db="DEMO_A", topic="cdc.public.account", group="tpt.demo_a.account", scenario="A", tables=["account"]),
-    "demo_a_card": dict(script="scenario_a/load_card.tbuild", db="DEMO_A", topic="cdc.public.card", group="tpt.demo_a.card", scenario="A", tables=["card"]),
-    "demo_a_payment": dict(script="scenario_a/load_payment.tbuild", db="DEMO_A", topic="cdc.public.payment", group="tpt.demo_a.payment", scenario="A", tables=["payment"]),
-    "demo_a_transaction": dict(script="scenario_a/load_transaction.tbuild", db="DEMO_A", topic="cdc.public.transaction", group="tpt.demo_a.transaction", scenario="A", tables=["transaction"]),
-    "demo_b_all": dict(script="scenario_b/load_all.tbuild", db="DEMO_B", topic=None, group="tpt.demo_b", scenario="B", tables=["customer", "account", "card", "payment", "transaction"]),
-    "demo_c_transaction": dict(script="scenario_c/load_transaction.tbuild", db="DEMO_C", topic="cdc.public.transaction", group="tpt.demo_c.transaction", scenario="C", tables=["transaction"]),
-    "demo_c_warm": dict(script="scenario_c/load_warm.tbuild", db="DEMO_C", topic=None, group="tpt.demo_c.warm", scenario="C", tables=["customer", "account", "card", "payment"]),
-    "demo_d_all": dict(script="scenario_d/load_all.tbuild", db="DEMO_D", topic=None, group="tpt.demo_d", scenario="D", tables=["merchant", "branch", "fx_rate"]),
+    "demo_a_customer": dict(script="scenario_a/load_customer.tbuild", db="DEMO_A", topic="cdc.public.customer", group="tpt.demo_a.customer", scenario="A", tables=["customer"], user="tpt_demo_a_customer"),
+    "demo_a_account": dict(script="scenario_a/load_account.tbuild", db="DEMO_A", topic="cdc.public.account", group="tpt.demo_a.account", scenario="A", tables=["account"], user="tpt_demo_a_account"),
+    "demo_a_card": dict(script="scenario_a/load_card.tbuild", db="DEMO_A", topic="cdc.public.card", group="tpt.demo_a.card", scenario="A", tables=["card"], user="tpt_demo_a_card"),
+    "demo_a_payment": dict(script="scenario_a/load_payment.tbuild", db="DEMO_A", topic="cdc.public.payment", group="tpt.demo_a.payment", scenario="A", tables=["payment"], user="tpt_demo_a_payment"),
+    "demo_a_transaction": dict(script="scenario_a/load_transaction.tbuild", db="DEMO_A", topic="cdc.public.transaction", group="tpt.demo_a.transaction", scenario="A", tables=["transaction"], user="tpt_demo_a_transaction"),
+    "demo_b_all": dict(script="scenario_b/load_all.tbuild", db="DEMO_B", topic=None, group="tpt.demo_b", scenario="B", tables=["customer", "account", "card", "payment", "transaction"], user="tpt_demo_b_all"),
+    "demo_c_transaction": dict(script="scenario_c/load_transaction.tbuild", db="DEMO_C", topic="cdc.public.transaction", group="tpt.demo_c.transaction", scenario="C", tables=["transaction"], user="tpt_demo_c_transaction"),
+    "demo_c_warm": dict(script="scenario_c/load_warm.tbuild", db="DEMO_C", topic=None, group="tpt.demo_c.warm", scenario="C", tables=["customer", "account", "card", "payment"], user="tpt_demo_c_warm"),
+    "demo_d_all": dict(script="scenario_d/load_all.tbuild", db="DEMO_D", topic=None, group="tpt.demo_d", scenario="D", tables=["merchant", "branch", "fx_rate"], user="tpt_demo_d_all"),
 }
 
 LANDING_TABLES = {
@@ -121,8 +128,8 @@ def launch_job(job_name, fresh=False):
     spec = JOBS[job_name]
     env = os.environ.copy()
     env["TD_HOST"] = TD_HOST
-    env["TD_USER"] = TD_USER
-    env["TD_PASSWORD"] = TD_PASSWORD
+    env["TD_USER"] = spec["user"]
+    env["TD_PASSWORD"] = TPT_JOB_PASSWORD
     env["TD_DATABASE"] = spec["db"]
     env["KAFKA_BOOTSTRAP"] = KAFKA_BOOTSTRAP
     env["KAFKA_DUMMY_DIR"] = "C:\\Windows\\Temp"

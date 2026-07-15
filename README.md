@@ -20,7 +20,7 @@ A/B/C run continuously against the **same live CDC stream**, landing into three 
 - **Kafka UI** (Docker) — inspect topics, messages, consumer groups, the connector.
 - **Load generator** (Docker, port 8090) — seeds Postgres and then drives a continuous mix of INSERT/UPDATE/DELETE, weighted toward `transaction`; supports a burst mode and manual ad-hoc ops. Feeds A/B/C.
 - **CSV load generator** (Docker, port 8092) — a separate, standalone service that writes flat CSV rows directly to 3 Kafka topics (`csv.merchant`/`csv.branch`/`csv.fx_rate`), independent of Postgres/Debezium. Feeds Scenario D only. Same seed/steady/burst/manual control shape as the main load generator, see `csv-load-generator/generator.py`.
-- **TPT (`tbuild`) jobs** — one Kafka Access Module (`libkafkaaxsmod`) reader per topic, streaming into Teradata via the `STREAM` operator. **Run as native Windows processes.** Scenario D's job upserts straight into the target tables from the same `STREAM` operator mechanism — see `docs/scenario-d-csv-direct-load.md` for the exact TPT grammar that makes that possible with zero landing tables.
+- **TPT (`tbuild`) jobs** — one Kafka Access Module (`libkafkaaxsmod`) reader per topic, streaming into Teradata via the `STREAM` operator. **Run as native Windows processes.** Scenario D's job upserts straight into the target tables from the same `STREAM` operator mechanism — see `docs/scenario-d-csv-direct-load.md` for the exact TPT grammar that makes that possible with zero landing tables. Each of the 9 jobs logs on as its own `tpt_demo_*` Teradata user (see `teradata/ddl/08_tpt_users.bteq`) — scoped to just its own demo database, so job activity is individually attributable and none of them carry `dbc`-level access. DDL, merge routines, and the dashboard's own metrics polling still use the admin login (`TD_USER`/`TD_PASSWORD`, `dbc`/`dbc` by default).
 - **BTEQ DDL + merge routines** — Idempotent `MERGE` per table (dedup by business key + `source.ts_ms`, "latest wins"), soft-delete via `cdc_deleted_ind`/`cdc_operation_cd`. Scenario D has no merge routines — the upsert happens inside its TPT job's own `APPLY` DML instead.
 - **Dashboard** (native Python/FastAPI + Chart.js, port 8091) — live row counts, per-table landing latency and landing-table backlog, per-scenario resource overhead (CPU/memory/process/session count), TPT job status, and buttons to burst-load, kill, and restart individual TPT jobs; burst triggers are annotated directly on the latency chart. Doubles as the metrics collector (no separate service). Scenario D's card always shows `backlog: 0` — by design, there's no landing table for anything to back up in.
 
@@ -45,7 +45,7 @@ connectors/                       Debezium connector config + registration scrip
 load-generator/                   seed / steady / burst / manual CDC load generator (Docker, feeds A/B/C)
 csv-load-generator/                seed / steady / burst / manual CSV-to-Kafka generator (Docker, feeds D only)
 teradata/
-  ddl/                            00_databases, 01/02/03_scenario_{a,b,c}, 04_admin, 06_scenario_c_tiered, 07_scenario_d
+  ddl/                            00_databases, 01/02/03_scenario_{a,b,c}, 04_admin, 06_scenario_c_tiered, 07_scenario_d, 08_tpt_users
   merge/                          idempotent MERGE routines, one per (scenario, table) - none for D
   run_merge_loop.ps1              loops every merge script on a short interval (A/B/C only)
   reset.bteq                      truncates all landing/target/admin tables for a clean rehearsal
@@ -72,7 +72,7 @@ Run these in order. Steps 1–4 are Docker-only and fully self-contained. Steps 
 cp .env.example .env
 ```
 
-`.env` is read by `docker-compose.yml` (Postgres creds, Kafka bootstrap for *container-to-container* use, load generator pacing). It is **not** read by the native PowerShell scripts below — those default to `TD_HOST=192.168.1.205`, `TD_USER=dbc`, `TD_PASSWORD=dbc`, `KAFKA_BOOTSTRAP=localhost:9092` (the host-mapped port, different from the container-internal `kafka:19092` in `.env`). Override by setting `$env:TD_HOST` etc. in your PowerShell session before running them if you need a different target.
+`.env` is read by `docker-compose.yml` (Postgres creds, Kafka bootstrap for *container-to-container* use, load generator pacing). It is **not** read by the native PowerShell scripts below — those default to `TD_HOST=192.168.1.205`, `TD_USER=dbc`, `TD_PASSWORD=dbc`, `KAFKA_BOOTSTRAP=localhost:9092` (the host-mapped port, different from the container-internal `kafka:19092` in `.env`). Override by setting `$env:TD_HOST` etc. in your PowerShell session before running them if you need a different target. The one exception is `TPT_JOB_PASSWORD` (the shared password for the 9 per-job `tpt_demo_*` logins the TPT jobs use — see Architecture above): the `run_scenario_*.ps1` launchers and the dashboard *do* read `$env:TPT_JOB_PASSWORD`, defaulting to `TptDemo2026Pass` if unset, matching the value `.env.example` ships with.
 
 ### 2. Start the Docker stack
 
@@ -123,17 +123,17 @@ This publishes 50 merchant / 30 branch / 15 fx_rate insert rows to the `csv.*` t
 From PowerShell, with the TTU client on PATH-equivalent (full path used explicitly by the scripts):
 
 ```powershell
-$env:TD_HOST="192.168.1.205"; $env:TD_USER="dbc"; $env:TD_PASSWORD="dbc"
-foreach ($f in "00_databases","01_scenario_a","02_scenario_b","03_scenario_c","04_admin","06_scenario_c_tiered","07_scenario_d") {
+$env:TD_HOST="192.168.1.205"; $env:TD_USER="dbc"; $env:TD_PASSWORD="dbc"; $env:TPT_JOB_PASSWORD="TptDemo2026Pass"
+foreach ($f in "00_databases","01_scenario_a","02_scenario_b","03_scenario_c","04_admin","06_scenario_c_tiered","07_scenario_d","08_tpt_users") {
   powershell -File tpt\scripts\run_bteq.ps1 "teradata\ddl\$f.bteq"
 }
 ```
 
-This creates `DEMO_A`/`DEMO_B`/`DEMO_C`/`DEMO_D`/`DEMO_ADMIN` (conservative `PERM` sizing — this is a shared lab system, not dedicated capacity) and every landing/target/admin table (`DEMO_D` gets target tables only — no landing tables, see `docs/scenario-d-csv-direct-load.md`). Safe to re-run — DDL scripts tolerate "already exists" (informational, not fatal).
+This creates `DEMO_A`/`DEMO_B`/`DEMO_C`/`DEMO_D`/`DEMO_ADMIN` (conservative `PERM` sizing — this is a shared lab system, not dedicated capacity) and every landing/target/admin table (`DEMO_D` gets target tables only — no landing tables, see `docs/scenario-d-csv-direct-load.md`). `08_tpt_users` must run after `00_databases` (its users are created `FROM DEMO_ADMIN`, and it grants against `DEMO_A`/`DEMO_B`/`DEMO_C`) and after `07_scenario_d` (creates `DEMO_D`) — keep it last, as ordered above. Safe to re-run — DDL scripts tolerate "already exists" (informational, not fatal).
 
 ### 6. Start the TPT jobs
 
-Each launcher opens its job(s) in their own visible PowerShell window (`-NoExit`) — deliberately, so a live audience can see "N processes running" and you can close a window to kill one:
+Each launcher opens its job(s) in their own visible PowerShell window (`-NoExit`) — deliberately, so a live audience can see "N processes running" and you can close a window to kill one. Each job logs on as its own `tpt_demo_*` user (created in step 5) rather than a shared admin login — the launcher window title/output shows which one.
 
 ```powershell
 powershell -File tpt\run_scenario_a.ps1   # 5 windows: 1 per table
@@ -217,7 +217,7 @@ For Scenario D, since it's not driven by Postgres: `docker compose run --rm csv-
 ## Reset for a clean rehearsal run
 
 1. Stop all TPT job windows (or kill via the dashboard).
-2. Truncate every landing/target/admin table:
+2. Truncate every landing/target/admin table, and drop every TPT job's own auto-created `LogTable`/`ErrorTable` pair (TPT recreates them fresh on next job start — this also prevents the restart-failure case in Known Limitations below):
    ```powershell
    $env:TD_HOST="192.168.1.205"; $env:TD_USER="dbc"; $env:TD_PASSWORD="dbc"
    powershell -File tpt\scripts\run_bteq.ps1 teradata\reset.bteq
@@ -248,5 +248,7 @@ Stops the Docker stack. As with `start.sh`, run it via `bash` explicitly — Pow
 - **Teradata session counts are derived, not queried live.** The dashboard's per-scenario session count is `running jobs × 2` (empirically confirmed sessions-per-job for a STREAM operator with no explicit `MaxSessions`), not a live `DBC.SessionInfoV` query — Teradata doesn't promptly release sessions after a killed job's `tbuild.exe` is `taskkill`'d, which would otherwise show stale/inflated numbers right at the kill/restart demo beat.
 - Account/Payment tables in Scenario A were spot-verified but not exhaustively load-tested (Customer, Card, and Transaction were the tables put through the most iteration).
 - No TLS/SASL, no PII masking — fine for a demo, caveat if presenting to a security-conscious audience.
-- **Scenario D's `*_ET` error tables accumulate rows during normal operation, by design.** Its upsert idiom fires an `INSERT` after every successful `UPDATE`; that `INSERT` always hits a duplicate-key violation and lands in the error table. Non-zero `MERCHANT_ET`/`BRANCH_ET`/`FX_RATE_ET` row counts are expected, not a sign something's broken — see `docs/scenario-d-csv-direct-load.md` §1.4. Drop and let TPT recreate them (`DROP TABLE DEMO_D.<table>_ET/_LT`) between job restarts if they get large, same as A/B/C's landing/error tables.
+- **The 9 `tpt_demo_*` TPT job users share one password (`TPT_JOB_PASSWORD`).** Each has a distinct login (for per-job attribution) and is scoped to just its own demo database (for least-privilege), but the password itself isn't per-user — fine for a lab box, not a pattern to carry into a real deployment.
+- **Scenario D's `*_ET` error tables accumulate rows during normal operation, by design.** Its upsert idiom fires an `INSERT` after every successful `UPDATE`; that `INSERT` always hits a duplicate-key violation and lands in the error table. Non-zero `MERCHANT_ET`/`BRANCH_ET`/`FX_RATE_ET` row counts are expected, not a sign something's broken — see `docs/scenario-d-csv-direct-load.md` §1.4.
+- **A job left mid-run by an earlier failure can leave its `LogTable`/`ErrorTable` pair (any scenario, not just D) in a state that breaks the *next* start.** Confirmed empirically 2026-07-15: the STREAM operator's own `CREATE TABLE` on job start errors with "already exists" (3803) against a pair left behind by an aborted prior run, and the whole job aborts with 0 records processed — a hard restart failure, not just accumulating rows. `teradata/reset.bteq` now drops and lets TPT recreate every job's `_LT`/`_ET` pair as part of a full reset (see "Reset for a clean rehearsal run" above), which is the fix for this in the common case. It won't help a single job's kill/restart through the dashboard, though — that path only clears checkpoints, not these tables — so if a job refuses to restart after an earlier failure, manually `DROP TABLE <db>.<table>_LT` / `<table>_ET` for that job (see the naming pattern in `teradata/reset.bteq`) before retrying.
 - **Scenario D has no raw-payload audit trail.** A/B/C's landing tables double as a replay-from-landing safety net; D lands straight into the target tables, so that staging tier doesn't exist for it. A real tradeoff, not a bug — flag it if a customer's compliance story leans on staged raw-event retention.
